@@ -7,63 +7,44 @@ import streamlit as st
 st.set_page_config(page_title="Sistema de Bodega", layout="wide")
 
 # ==========================================
-# PERSONALIZACIÓN DE ESTILO (CSS)
+# ESTILO VISUAL (CSS)
 # ==========================================
 st.markdown(
     """
 <style>
-/* 1. FORZAR TEXTO NEGRO Y MÁS GRANDE EN TODA LA APP */
 [data-testid="stAppViewContainer"] * {
     color: #000000 !important;
 }
-
-/* 2. PESTAÑAS (TABS) EN NEGRITA Y MÁS GRANDES */
-button[data-baseweb="tab"] p,
-button[data-baseweb="tab"] div,
-[data-testid="stTab"] p {
+button[data-baseweb="tab"] p, button[data-baseweb="tab"] div, [data-testid="stTab"] p {
     font-size: 22px !important;
     font-weight: 900 !important;
     color: #000000 !important;
 }
-
-/* 3. TÍTULOS DE SECCIONES (H2, H3) */
 h2, h3, h4 {
     font-size: 22px !important;
     font-weight: 800 !important;
     color: #000000 !important;
 }
-
-/* 4. CAMPOS DE ENTRADA (RECUADROS PARA LA PISTOLA Y BÚSQUEDAS) */
 .stTextInput input, .stSelectbox div {
     font-size: 20px !important;
     font-weight: 600 !important;
     color: #000000 !important;
     background-color: #FFFFFF !important;
-    border: 2px solid #1E3A8A !important;  /* Borde azul marino grueso */
+    border: 2px solid #1E3A8A !important;
     border-radius: 8px !important;
 }
-
-/* RESALTADO ESPECIAL CUANDO EL CAMPO ESTÁ SELECCIONADO (FOCO) */
-.stTextInput input:focus {
-    border: 3px solid #000000 !important;
-    box-shadow: 0 0 10px rgba(30, 58, 138, 0.5) !important;
-}
-
-/* ETIQUETAS DE TEXTO SOBRE LOS CAMPOS */
-.stTextInput label, .stRadio label, .stSelectbox label {
-    font-size: 19px !important;
+.stTextInput label, .stRadio label, .stSelectbox label, .stCheckbox label {
+    font-size: 18px !important;
     font-weight: bold !important;
     color: #000000 !important;
 }
-
-/* TARJETAS DE MÉTRICAS */
 [data-testid="stMetricValue"] {
-    font-size: 2.4rem !important;
+    font-size: 2.2rem !important;
     font-weight: 900 !important;
     color: #000000 !important;
 }
 [data-testid="stMetricLabel"] {
-    font-size: 1.2rem !important;
+    font-size: 1.1rem !important;
     font-weight: bold !important;
     color: #000000 !important;
 }
@@ -78,14 +59,13 @@ ARCHIVO_UBICACIONES = "ubicaciones.csv"
 def limpiar_codigo(val):
   if pd.isna(val):
     return ""
-  try:
-    return str(int(float(val)))
-  except:
-    return str(val).strip()
+  s = str(val).strip()
+  if s.endswith(".0"):
+    s = s[:-2]
+  return s
 
 
 def extraer_talla(referencia):
-  """Extrae la talla que viene después del guión en la columna 'Referencia'."""
   if pd.isna(referencia):
     return "N/A"
   ref_str = str(referencia).strip()
@@ -96,36 +76,68 @@ def extraer_talla(referencia):
 
 
 def extraer_codigos_multiples(cadena_raw):
-  """Si la pistola pegó dos o más códigos por el retraso de la app,
-
-  esta función los separa automáticamente en una lista de códigos.
-  """
   cadena = limpiar_codigo(cadena_raw)
   if not cadena:
     return []
-
-  longitud = len(cadena)
-
-  if longitud == 24:
+  l = len(cadena)
+  if l == 24:
     return [cadena[:12], cadena[12:]]
-  elif longitud == 26:
+  elif l == 26:
     return [cadena[:13], cadena[13:]]
-  elif longitud == 36:
+  elif l == 36:
     return [cadena[:12], cadena[12:24], cadena[24:]]
-  elif longitud == 39:
+  elif l == 39:
     return [cadena[:13], cadena[13:26], cadena[26:]]
-
   return [cadena]
 
 
 @st.cache_data
 def cargar_inventario():
-  df = pd.read_csv(
-      "RPInv_Extracto_Referencia.csv", skiprows=5, encoding="utf-8-sig"
-  )
+  archivo = "RPInv_Extracto_Referencia.csv"
+  try:
+    df = pd.read_csv(archivo, skiprows=5, encoding="utf-8-sig", dtype=str)
+    if "CodigoAlterno" not in df.columns:
+      df = pd.read_csv(archivo, encoding="utf-8-sig", dtype=str)
+  except Exception:
+    df = pd.read_csv(archivo, encoding="utf-8-sig", dtype=str)
+
   df = df.dropna(subset=["CodigoAlterno"])
   df["CodigoLimpio"] = df["CodigoAlterno"].apply(limpiar_codigo)
   df["Talla"] = df["Referencia"].apply(extraer_talla)
+
+  # Detección de columna de existencia en el CSV
+  posibles_cols = [
+      "existencia",
+      "cantidad",
+      "stock",
+      "disponible",
+      "tienda",
+      "cant",
+      "saldo",
+      "unidades",
+  ]
+  col_existencia = next(
+      (
+          c
+          for c in df.columns
+          if any(p in str(c).lower() for p in posibles_cols)
+      ),
+      None,
+  )
+
+  if col_existencia:
+    df["Stock_Sistema"] = (
+        pd.to_numeric(df[col_existencia], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+  else:
+    df["Stock_Sistema"] = 0
+
+  # FILTRO GLOBAL: Eliminar del catálogo cualquier producto/talla con 0 o menor en el sistema
+  df = df[df["Stock_Sistema"] > 0]
+
+  df = df.drop_duplicates(subset=["CodigoLimpio"])
   return df
 
 
@@ -165,6 +177,7 @@ def cargar_ubicaciones():
         )
 
       if not df.empty:
+        df = df[df["Cantidad"] > 0]
         df = df.groupby(["CodigoLimpio", "Ubicacion"], as_index=False).agg(
             {"Cantidad": "sum", "Fecha": "last"}
         )
@@ -208,7 +221,6 @@ def guardar_ubicacion(
 
   if es_primer_escaneo_reemplazo:
     df_ub = df_ub[df_ub["CodigoLimpio"] != codigo_limpio]
-
     nueva_fila = pd.DataFrame([{
         "CodigoLimpio": codigo_limpio,
         "Ubicacion": nueva_ubicacion,
@@ -256,7 +268,6 @@ def obtener_resumen_producto(codigo_limpio, df_ub):
   return texto_ub, total_piezas
 
 
-# Cargar catálogo
 try:
   df_inv = cargar_inventario()
   datos_cargados = True
@@ -265,14 +276,21 @@ except Exception as e:
   st.error(f"Error al cargar el archivo CSV de inventario: {e}")
 
 
+# ==========================================
+# BARRA LATERAL (CONTROLES GLOBALES)
+# ==========================================
+with st.sidebar:
+  st.markdown("### ⚙️ Opciones del Sistema")
+  if st.button("🔄 Recargar Inventario CSV", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+
 def get_base64_image(image_path):
   with open(image_path, "rb") as img_file:
     return base64.b64encode(img_file.read()).decode()
 
 
-# ==========================================
-# ENCABEZADO CON LOGO CENTRADO Y MÁS GRANDE
-# ==========================================
 if os.path.exists("Adidas-logo.png"):
   img_b64 = get_base64_image("Adidas-logo.png")
   st.markdown(
@@ -332,31 +350,35 @@ with tab1:
       ubicacion_texto, total_pzas = obtener_resumen_producto(
           codigo_buscado, df_ub
       )
+      stock_sis = prod["Stock_Sistema"]
+      diferencia = total_pzas - stock_sis
 
       st.success(f"¡Producto Encontrado! (Código: {codigo_buscado})")
 
-      col_cat, col_ubic, col_tot = st.columns(3)
+      col_cat, col_sis, col_tot, col_dif, col_ubic = st.columns(5)
       with col_cat:
-        st.metric(label="🎯 CATEGORÍA / DEPORTE", value=str(prod["Nivel2"]))
+        st.metric(label="🎯 CATEGORÍA", value=str(prod.get("Nivel2", "N/A")))
+      with col_sis:
+        st.metric(label="💻 SISTEMA (CSV)", value=f"{stock_sis} pza(s)")
+      with col_tot:
+        st.metric(label="📦 BODEGA (FÍSICO)", value=f"{total_pzas} pza(s)")
+      with col_dif:
+        st.metric(label="⚠️ DIFERENCIA", value=f"{diferencia} pza(s)")
       with col_ubic:
         st.metric(label="📍 UBICACIONES BODEGA", value=str(ubicacion_texto))
-      with col_tot:
-        st.metric(
-            label="📦 TOTAL PIEZAS BODEGA", value=f"{total_pzas} pza(s)"
-        )
 
       st.divider()
 
       col1, col2 = st.columns(2)
       with col1:
-        st.write(f"**Tipo:** {prod['Nivel1']}")
-        st.write(f"**Línea:** {prod['Nivel3']}")
-        st.write(f"**Talla:** {prod['Talla']}")
+        st.write(f"**Tipo:** {prod.get('Nivel1', '-')}")
+        st.write(f"**Línea:** {prod.get('Nivel3', '-')}")
+        st.write(f"**Talla:** {prod.get('Talla', '-')}")
       with col2:
-        st.write(f"**Público:** {prod['Nivel4']}")
-        st.write(f"**Referencia:** {prod['Referencia']}")
+        st.write(f"**Público:** {prod.get('Nivel4', '-')}")
+        st.write(f"**Referencia:** {prod.get('Referencia', '-')}")
 
-      st.info(f"**Descripción:** {prod['Descripcion']}")
+      st.info(f"**Descripción:** {prod.get('Descripcion', '-')}")
     else:
       df_ub = cargar_ubicaciones()
       ubicacion_texto, total_pzas = obtener_resumen_producto(
@@ -384,12 +406,14 @@ with tab2:
       horizontal=True,
   )
 
+  ver_sin_stock = st.checkbox(
+      "Mostrar también registros en ceros (0 en sistema y 0 en bodega)",
+      value=False,
+  )
+
   if opcion_busqueda == "🔤 Por Nombre / Descripción / Referencia":
     busqueda_texto = (
-        st.text_input(
-            "Escribe el nombre, referencia, palabra clave o talla (Ej. S, M, 7,"
-            " 9.5):"
-        )
+        st.text_input("Escribe el nombre, referencia, palabra clave o código:")
         .strip()
         .lower()
     )
@@ -440,31 +464,52 @@ with tab2:
             suffixes=("", "_ub"),
         )
 
-        st.write(
-            f"Se encontraron **{len(merged)}** modelo(s) coincidente(s):"
-        )
+        merged["Stock_Sistema"] = merged["Stock_Sistema"].fillna(0).astype(int)
+        merged["TotalPiezas"] = merged["TotalPiezas"].fillna(0).astype(int)
+        merged["Ubicacion"] = merged["Ubicacion"].fillna("⚠️ Sin asignar")
+        merged["Diferencia"] = merged["TotalPiezas"] - merged["Stock_Sistema"]
 
-        columnas_mostrar = [
-            "CodigoLimpio",
-            "Descripcion",
-            "Referencia",
-            "Talla",
-            "Nivel2",
-            "Ubicacion",
-            "TotalPiezas",
-        ]
-        st.dataframe(
-            merged[columnas_mostrar].rename(columns={
-                "CodigoLimpio": "Código",
-                "Descripcion": "Descripción",
-                "Referencia": "Referencia",
-                "Talla": "Talla",
-                "Nivel2": "Categoría",
-                "Ubicacion": "Ubicaciones y Cantidad",
-                "TotalPiezas": "Total Piezas",
-            }),
-            use_container_width=True,
-        )
+        if not ver_sin_stock:
+          merged = merged[
+              (merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)
+          ]
+
+        if not merged.empty:
+          st.write(
+              f"Se encontraron **{len(merged)}** registro(s) con existencias o"
+              " diferencias:"
+          )
+
+          columnas_mostrar = [
+              "CodigoLimpio",
+              "Descripcion",
+              "Referencia",
+              "Talla",
+              "Nivel2",
+              "Stock_Sistema",
+              "TotalPiezas",
+              "Diferencia",
+              "Ubicacion",
+          ]
+          st.dataframe(
+              merged[columnas_mostrar].rename(columns={
+                  "CodigoLimpio": "Código",
+                  "Descripcion": "Descripción",
+                  "Referencia": "Referencia",
+                  "Talla": "Talla",
+                  "Nivel2": "Categoría",
+                  "Stock_Sistema": "Sistema (CSV)",
+                  "TotalPiezas": "Bodega (Físico)",
+                  "Diferencia": "Diferencia",
+                  "Ubicacion": "Ubicaciones Bodega",
+              }),
+              use_container_width=True,
+          )
+        else:
+          st.warning(
+              "Se encontraron coincidencias en el catálogo, pero todas las"
+              " tallas están en 0 (Sistema y Bodega)."
+          )
       else:
         st.warning("No se encontraron productos con ese término de búsqueda.")
 
@@ -474,7 +519,7 @@ with tab2:
           [t for t in df_inv["Talla"].unique() if t and t != "N/A"]
       )
       talla_seleccionada = st.selectbox(
-          "Selecciona o escribe la talla que deseas consultar:",
+          "Selecciona o escribe la talla:",
           ["-- Selecciona una talla --"] + tallas_disponibles,
       )
 
@@ -508,32 +553,55 @@ with tab2:
               suffixes=("", "_ub"),
           )
 
-          st.write(
-              f"Se encontraron **{len(merged)}** producto(s) en talla"
-              f" **'{talla_seleccionada}'**:"
+          merged["Stock_Sistema"] = (
+              merged["Stock_Sistema"].fillna(0).astype(int)
+          )
+          merged["TotalPiezas"] = merged["TotalPiezas"].fillna(0).astype(int)
+          merged["Ubicacion"] = merged["Ubicacion"].fillna("⚠️ Sin asignar")
+          merged["Diferencia"] = (
+              merged["TotalPiezas"] - merged["Stock_Sistema"]
           )
 
-          columnas_mostrar = [
-              "CodigoLimpio",
-              "Descripcion",
-              "Referencia",
-              "Talla",
-              "Nivel2",
-              "Ubicacion",
-              "TotalPiezas",
-          ]
-          st.dataframe(
-              merged[columnas_mostrar].rename(columns={
-                  "CodigoLimpio": "Código",
-                  "Descripcion": "Descripción",
-                  "Referencia": "Referencia",
-                  "Talla": "Talla",
-                  "Nivel2": "Categoría",
-                  "Ubicacion": "Ubicaciones y Cantidad",
-                  "TotalPiezas": "Total Piezas",
-              }),
-              use_container_width=True,
-          )
+          if not ver_sin_stock:
+            merged = merged[
+                (merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)
+            ]
+
+          if not merged.empty:
+            st.write(
+                f"Se encontraron **{len(merged)}** producto(s) en talla"
+                f" **'{talla_seleccionada}'**:"
+            )
+
+            columnas_mostrar = [
+                "CodigoLimpio",
+                "Descripcion",
+                "Referencia",
+                "Talla",
+                "Nivel2",
+                "Stock_Sistema",
+                "TotalPiezas",
+                "Diferencia",
+                "Ubicacion",
+            ]
+            st.dataframe(
+                merged[columnas_mostrar].rename(columns={
+                    "CodigoLimpio": "Código",
+                    "Descripcion": "Descripción",
+                    "Referencia": "Referencia",
+                    "Talla": "Talla",
+                    "Nivel2": "Categoría",
+                    "Stock_Sistema": "Sistema (CSV)",
+                    "TotalPiezas": "Bodega (Físico)",
+                    "Diferencia": "Diferencia",
+                    "Ubicacion": "Ubicaciones Bodega",
+                }),
+                use_container_width=True,
+            )
+          else:
+            st.warning(
+                f"No hay piezas con existencias para la talla '{talla_seleccionada}'."
+            )
         else:
           st.warning(
               f"No hay productos registrados con la talla '{talla_seleccionada}'."
@@ -541,10 +609,7 @@ with tab2:
 
   else:
     busqueda_ub = (
-        st.text_input(
-            "Escribe el nombre del estante o ubicación (Ejemplo: T1, T6,"
-            " Pasillo 2):"
-        )
+        st.text_input("Escribe el nombre del estante o ubicación (Ejemplo: S5):")
         .strip()
         .upper()
     )
@@ -575,12 +640,20 @@ with tab2:
             merged_loc["Referencia"] = merged_loc["Referencia"].fillna("-")
             merged_loc["Talla"] = merged_loc["Talla"].fillna("-")
             merged_loc["Nivel2"] = merged_loc["Nivel2"].fillna("-")
+            merged_loc["Stock_Sistema"] = (
+                merged_loc["Stock_Sistema"].fillna(0).astype(int)
+            )
           else:
             merged_loc = df_ub_filtrado
             merged_loc["Descripcion"] = "Sin catálogo"
             merged_loc["Referencia"] = "-"
             merged_loc["Talla"] = "-"
             merged_loc["Nivel2"] = "-"
+            merged_loc["Stock_Sistema"] = 0
+
+          merged_loc["Diferencia"] = (
+              merged_loc["Cantidad"] - merged_loc["Stock_Sistema"]
+          )
 
           total_pzas_estante = merged_loc["Cantidad"].sum()
           modelos_unicos = len(merged_loc)
@@ -604,7 +677,9 @@ with tab2:
               "Referencia",
               "Talla",
               "Nivel2",
+              "Stock_Sistema",
               "Cantidad",
+              "Diferencia",
               "Ubicacion",
           ]
           st.dataframe(
@@ -614,7 +689,9 @@ with tab2:
                   "Referencia": "Referencia",
                   "Talla": "Talla",
                   "Nivel2": "Categoría",
-                  "Cantidad": "Piezas en Estante",
+                  "Stock_Sistema": "Sistema (CSV)",
+                  "Cantidad": "Bodega (Físico)",
+                  "Diferencia": "Diferencia Estante vs Sistema",
                   "Ubicacion": "Estante",
               }),
               use_container_width=True,
@@ -667,7 +744,7 @@ with tab3:
 
   with col_input_ub:
     ub_actual_input = st.text_input(
-        "1. Escribe la ubicación actual (Ejemplo: T1, T3, A6, Pasillo 2):",
+        "1. Escribe la ubicación actual (Ejemplo: S5, T1, Pasillo 2):",
         key="ubicacion_fija_input",
     ).strip()
 
@@ -743,8 +820,7 @@ with tab3:
     st.session_state["barcode_ub_input"] = ""
 
   st.text_input(
-      "2. Apunta la pistola y dispara a los productos uno por uno (Da 1 segundo"
-      " entre disparos):",
+      "2. Apunta la pistola y dispara a los productos uno por uno:",
       key="barcode_ub_input",
       on_change=procesar_escaneo_ubicacion,
   )
@@ -809,7 +885,6 @@ with tab4:
           if not codigo or cant_vendida <= 0:
             continue
 
-          # 1. Intentar descontar de PISO primero
           mask_piso = (df_ub_local["CodigoLimpio"] == codigo) & (
               df_ub_local["Ubicacion"] == "PISO"
           )
@@ -825,7 +900,6 @@ with tab4:
 
             cant_restante = cant_vendida - desc_piso
 
-            # Buscar en qué estante de bodega hay existencias para resurtir a piso
             bodega_items = df_ub_local[
                 (df_ub_local["CodigoLimpio"] == codigo)
                 & (df_ub_local["Ubicacion"] != "PISO")
@@ -840,8 +914,8 @@ with tab4:
             if datos_cargados:
               match = df_inv[df_inv["CodigoLimpio"] == codigo]
               if not match.empty:
-                desc_prod = match.iloc[0]["Descripcion"]
-                talla_prod = match.iloc[0]["Talla"]
+                desc_prod = match.iloc[0].get("Descripcion", "Sin Descripción")
+                talla_prod = match.iloc[0].get("Talla", "N/A")
 
             reporte_resurtido.append({
                 "Código": codigo,
@@ -854,7 +928,6 @@ with tab4:
           else:
             cant_restante = cant_vendida
 
-          # 2. Descontar remanente directamente de Bodega si no había suficiente en PISO
           if cant_restante > 0:
             mask_bodega = (df_ub_local["CodigoLimpio"] == codigo) & (
                 df_ub_local["Ubicacion"] != "PISO"
@@ -871,7 +944,6 @@ with tab4:
                 df_ub_local = df_ub_local.drop(idx)
               cant_restante -= desc_bod
 
-        # Guardar cambios
         df_ub_local.to_csv(ARCHIVO_UBICACIONES, index=False)
         st.success(
             "✅ Ventas procesadas correctamente y registro de ubicaciones"
