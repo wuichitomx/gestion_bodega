@@ -1,6 +1,7 @@
 import base64
 from datetime import datetime
 import os
+import sqlite3
 import pandas as pd
 import streamlit as st
 
@@ -53,8 +54,60 @@ h2, h3, h4 {
     unsafe_allow_html=True,
 )
 
-ARCHIVO_UBICACIONES = "ubicaciones.csv"
+DB_NAME = "bodega_inventario.db"
 
+# ==========================================
+# CONFIGURACIÓN DE BASE DE DATOS SQLITE
+# ==========================================
+def inicializar_db():
+  conn = sqlite3.connect(DB_NAME, timeout=10.0)
+  cursor = conn.cursor()
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ubicaciones (
+            codigo_limpio TEXT,
+            ubicacion TEXT,
+            cantidad INTEGER,
+            fecha TEXT,
+            PRIMARY KEY (codigo_limpio, ubicacion)
+        )
+    """)
+  conn.commit()
+  conn.close()
+
+# Migrar automáticamente si existía el viejo ubicaciones.csv (Versión Blindada)
+def migrar_csv_a_sqlite():
+  inicializar_db()
+  if os.path.exists("ubicaciones.csv") and os.path.getsize("ubicaciones.csv") > 0:
+    try:
+      df_old = pd.read_csv("ubicaciones.csv")
+      conn = sqlite3.connect(DB_NAME, timeout=10.0)
+      for _, row in df_old.iterrows():
+        col_cod = next((c for c in df_old.columns if "codigo" in str(c).lower()), None)
+        col_ub = next((c for c in df_old.columns if "ubicacion" in str(c).lower() or "ubicación" in str(c).lower()), None)
+        col_cant = next((c for c in df_old.columns if "cantidad" in str(c).lower()), None)
+        
+        if col_cod and col_ub:
+            cod = limpiar_codigo(row.get(col_cod, ""))
+            ub = str(row.get(col_ub, "")).upper().strip()
+            cant = int(row.get(col_cant, 1)) if col_cant else 1
+            fec = str(row.get("Fecha", datetime.now().strftime("%Y-%m-%d %H:%M")))
+            
+            if cod and ub:
+              conn.execute(
+                  """
+                            INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(codigo_limpio, ubicacion) 
+                            DO UPDATE SET cantidad = cantidad + ?, fecha = ?
+                        """,
+                  (cod, ub, cant, fec, cant, fec),
+              )
+      conn.commit()
+      conn.close()
+      os.rename("ubicaciones.csv", "ubicaciones_respaldo_migrado.csv")
+      st.success("✅ ¡Migración de ubicaciones completada con éxito hacia la Base de Datos SQLite!")
+    except Exception as e:
+      st.error(f"⚠️ Error al migrar los datos: {e}")
 
 def limpiar_codigo(val):
   if pd.isna(val):
@@ -64,6 +117,7 @@ def limpiar_codigo(val):
     s = s[:-2]
   return s
 
+migrar_csv_a_sqlite()
 
 def extraer_talla(referencia):
   if pd.isna(referencia):
@@ -73,7 +127,6 @@ def extraer_talla(referencia):
     partes = ref_str.split("-", 1)
     return partes[1].strip()
   return "N/A"
-
 
 def extraer_codigos_multiples(cadena_raw):
   cadena = limpiar_codigo(cadena_raw)
@@ -90,7 +143,6 @@ def extraer_codigos_multiples(cadena_raw):
     return [cadena[:13], cadena[13:26], cadena[26:]]
   return [cadena]
 
-
 @st.cache_data
 def cargar_inventario():
   archivo = "RPInv_Extracto_Referencia.csv"
@@ -105,7 +157,6 @@ def cargar_inventario():
   df["CodigoLimpio"] = df["CodigoAlterno"].apply(limpiar_codigo)
   df["Talla"] = df["Referencia"].apply(extraer_talla)
 
-  # Detección de columna de existencia en el CSV
   posibles_cols = [
       "existencia",
       "cantidad",
@@ -134,71 +185,31 @@ def cargar_inventario():
   else:
     df["Stock_Sistema"] = 0
 
-  # FILTRO GLOBAL: Eliminar del catálogo cualquier producto/talla con 0 o menor en el sistema
   df = df[df["Stock_Sistema"] > 0]
-
   df = df.drop_duplicates(subset=["CodigoLimpio"])
   return df
 
-
 def cargar_ubicaciones():
-  if (
-      os.path.exists(ARCHIVO_UBICACIONES)
-      and os.path.getsize(ARCHIVO_UBICACIONES) > 0
-  ):
-    try:
-      df = pd.read_csv(
-          ARCHIVO_UBICACIONES, dtype={"CodigoLimpio": str, "Ubicacion": str}
-      )
-      df["CodigoLimpio"] = df["CodigoLimpio"].apply(limpiar_codigo)
-      df["Ubicacion"] = df["Ubicacion"].astype(str).str.upper().str.strip()
-
-      if "Cantidad" not in df.columns:
-        filas = []
-        for _, row in df.iterrows():
-          ubs = [
-              u.strip() for u in str(row["Ubicacion"]).split(",") if u.strip()
-          ]
-          for u in ubs:
-            filas.append({
-                "CodigoLimpio": row["CodigoLimpio"],
-                "Ubicacion": u,
-                "Cantidad": 1,
-                "Fecha": row.get(
-                    "Fecha", datetime.now().strftime("%Y-%m-%d %H:%M")
-                ),
-            })
-        df = pd.DataFrame(filas)
-      else:
-        df["Cantidad"] = (
-            pd.to_numeric(df["Cantidad"], errors="coerce")
-            .fillna(1)
-            .astype(int)
-        )
-
-      if not df.empty:
-        df = df[df["Cantidad"] > 0]
-        df = df.groupby(["CodigoLimpio", "Ubicacion"], as_index=False).agg(
-            {"Cantidad": "sum", "Fecha": "last"}
-        )
-      return df
-    except Exception:
-      return pd.DataFrame(
-          columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"]
-      )
-  else:
+  try:
+    conn = sqlite3.connect(DB_NAME, timeout=10.0)
+    df = pd.read_sql(
+        "SELECT codigo_limpio AS CodigoLimpio, ubicacion AS Ubicacion, cantidad AS Cantidad, fecha AS Fecha FROM ubicaciones WHERE cantidad > 0",
+        conn,
+    )
+    conn.close()
+    return df
+  except Exception:
     return pd.DataFrame(
         columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"]
     )
 
-
 def vaciar_estante_completo(ubicacion):
-  df_ub = cargar_ubicaciones()
   ub_limpia = ubicacion.upper().strip()
-  if not df_ub.empty and ub_limpia:
-    df_ub = df_ub[df_ub["Ubicacion"] != ub_limpia]
-    df_ub.to_csv(ARCHIVO_UBICACIONES, index=False)
-
+  if ub_limpia:
+    conn = sqlite3.connect(DB_NAME, timeout=10.0)
+    conn.execute("DELETE FROM ubicaciones WHERE ubicacion = ?", (ub_limpia,))
+    conn.commit()
+    conn.close()
 
 def guardar_ubicacion(
     codigo,
@@ -206,12 +217,14 @@ def guardar_ubicacion(
     modo_reemplazar=False,
     productos_reemplazados_set=None,
 ):
-  df_ub = cargar_ubicaciones()
   codigo_limpio = limpiar_codigo(codigo)
   nueva_ubicacion = nueva_ubicacion.upper().strip()
 
   if not codigo_limpio or not nueva_ubicacion:
     return 0
+
+  conn = sqlite3.connect(DB_NAME, timeout=10.0)
+  cursor = conn.cursor()
 
   es_primer_escaneo_reemplazo = False
   if modo_reemplazar and productos_reemplazados_set is not None:
@@ -219,37 +232,52 @@ def guardar_ubicacion(
       es_primer_escaneo_reemplazo = True
       productos_reemplazados_set.add(codigo_limpio)
 
+  fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+
   if es_primer_escaneo_reemplazo:
-    df_ub = df_ub[df_ub["CodigoLimpio"] != codigo_limpio]
-    nueva_fila = pd.DataFrame([{
-        "CodigoLimpio": codigo_limpio,
-        "Ubicacion": nueva_ubicacion,
-        "Cantidad": 1,
-        "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }])
-    df_ub = pd.concat([df_ub, nueva_fila], ignore_index=True)
+    cursor.execute(
+        "DELETE FROM ubicaciones WHERE codigo_limpio = ?", (codigo_limpio,)
+    )
+    cursor.execute(
+        """
+            INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
+            VALUES (?, ?, 1, ?)
+        """,
+        (codigo_limpio, nueva_ubicacion, fecha_actual),
+    )
     cant_actual = 1
   else:
-    mask = (df_ub["CodigoLimpio"] == codigo_limpio) & (
-        df_ub["Ubicacion"] == nueva_ubicacion
+    cursor.execute(
+        """
+            SELECT cantidad FROM ubicaciones 
+            WHERE codigo_limpio = ? AND ubicacion = ?
+        """,
+        (codigo_limpio, nueva_ubicacion),
     )
-    if mask.any():
-      df_ub.loc[mask, "Cantidad"] = df_ub.loc[mask, "Cantidad"] + 1
-      df_ub.loc[mask, "Fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-      cant_actual = int(df_ub.loc[mask, "Cantidad"].values[0])
+    row = cursor.fetchone()
+
+    if row:
+      cant_actual = row[0] + 1
+      cursor.execute(
+          """
+                UPDATE ubicaciones SET cantidad = ?, fecha = ?
+                WHERE codigo_limpio = ? AND ubicacion = ?
+            """,
+          (cant_actual, fecha_actual, codigo_limpio, nueva_ubicacion),
+      )
     else:
-      nueva_fila = pd.DataFrame([{
-          "CodigoLimpio": codigo_limpio,
-          "Ubicacion": nueva_ubicacion,
-          "Cantidad": 1,
-          "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-      }])
-      df_ub = pd.concat([df_ub, nueva_fila], ignore_index=True)
       cant_actual = 1
+      cursor.execute(
+          """
+                INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
+                VALUES (?, ?, 1, ?)
+            """,
+          (codigo_limpio, nueva_ubicacion, fecha_actual),
+      )
 
-  df_ub.to_csv(ARCHIVO_UBICACIONES, index=False)
+  conn.commit()
+  conn.close()
   return cant_actual
-
 
 def obtener_resumen_producto(codigo_limpio, df_ub):
   match_ub = df_ub[df_ub["CodigoLimpio"] == codigo_limpio]
@@ -267,14 +295,12 @@ def obtener_resumen_producto(codigo_limpio, df_ub):
   total_piezas = match_ub["Cantidad"].sum()
   return texto_ub, total_piezas
 
-
 try:
   df_inv = cargar_inventario()
   datos_cargados = True
 except Exception as e:
   datos_cargados = False
   st.error(f"Error al cargar el archivo CSV de inventario: {e}")
-
 
 # ==========================================
 # BARRA LATERAL (CONTROLES GLOBALES)
@@ -285,14 +311,8 @@ with st.sidebar:
     st.cache_data.clear()
     st.rerun()
 
-
-def get_base64_image(image_path):
-  with open(image_path, "rb") as img_file:
-    return base64.b64encode(img_file.read()).decode()
-
-
 if os.path.exists("Adidas-logo.png"):
-  img_b64 = get_base64_image("Adidas-logo.png")
+  img_b64 = base64.b64encode(open("Adidas-logo.png", "rb").read()).decode()
   st.markdown(
       f"""
     <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 20px;">
@@ -308,7 +328,6 @@ else:
       ' 20px;">Gestión de Bodega</h1>',
       unsafe_allow_html=True,
   )
-
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔍 Escáner Rápido",
@@ -388,7 +407,6 @@ with tab1:
           f"⚠️ El código **{codigo_buscado}** no está en el catálogo CSV, pero"
           f" tiene registrada la ubicación: **{ubicacion_texto}**"
       )
-
 
 # ==========================================
 # PESTAÑA 2: BÚSQUEDA MANUAL Y POR ESTANTE
@@ -704,7 +722,6 @@ with tab2:
       else:
         st.info("Aún no se han registrado ubicaciones en la bodega.")
 
-
 # ==========================================
 # PESTAÑA 3: ASIGNAR UBICACIONES EN LOTE
 # ==========================================
@@ -872,7 +889,13 @@ with tab4:
       )
 
       if st.button("🚀 Procesar Ventas y Generar Resurtido", type="primary"):
-        df_ub_local = cargar_ubicaciones()
+        conn_v = sqlite3.connect(DB_NAME, timeout=10.0)
+        cursor_v = conn_v.cursor()
+
+        df_ub_local = pd.read_sql(
+            "SELECT codigo_limpio AS CodigoLimpio, ubicacion AS Ubicacion, cantidad AS Cantidad FROM ubicaciones",
+            conn_v,
+        )
         reporte_resurtido = []
 
         for _, row in df_v.iterrows():
@@ -944,10 +967,27 @@ with tab4:
                 df_ub_local = df_ub_local.drop(idx)
               cant_restante -= desc_bod
 
-        df_ub_local.to_csv(ARCHIVO_UBICACIONES, index=False)
+        cursor_v.execute("DELETE FROM ubicaciones")
+        for _, row in df_ub_local.iterrows():
+          if row["Cantidad"] > 0:
+            cursor_v.execute(
+                """
+                        INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
+                        VALUES (?, ?, ?, ?)
+                    """,
+                (
+                    row["CodigoLimpio"],
+                    row["Ubicacion"],
+                    int(row["Cantidad"]),
+                    datetime.now().strftime("%Y-%m-%d %H:%M"),
+                ),
+            )
+
+        conn_v.commit()
+        conn_v.close()
+
         st.success(
-            "✅ Ventas procesadas correctamente y registro de ubicaciones"
-            " actualizado."
+            "✅ Ventas procesadas correctamente y base de datos actualizada."
         )
 
         if reporte_resurtido:

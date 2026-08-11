@@ -1,12 +1,13 @@
+import sqlite3
 from datetime import datetime
 import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 import pandas as pd
 
-ARCHIVO_UBICACIONES = "ubicaciones.csv"
+# Archivo de base de datos SQLite y Catálogo
+DB_NAME = "bodega_inventario.db"
 ARCHIVO_CATALOGO = "RPInv_Extracto_Referencia.csv"
-
 
 # --- FUNCIONES DE BASE DE DATOS ---
 def limpiar_codigo(val):
@@ -17,7 +18,6 @@ def limpiar_codigo(val):
   except:
     return str(val).strip()
 
-
 def extraer_talla(referencia):
   if pd.isna(referencia):
     return "N/A"
@@ -26,7 +26,6 @@ def extraer_talla(referencia):
     partes = ref_str.split("-", 1)
     return partes[1].strip()
   return "N/A"
-
 
 def cargar_inventario():
   if os.path.exists(ARCHIVO_CATALOGO):
@@ -40,88 +39,79 @@ def cargar_inventario():
       pass
   return pd.DataFrame()
 
-
-def cargar_ubicaciones():
-  if (
-      os.path.exists(ARCHIVO_UBICACIONES)
-      and os.path.getsize(ARCHIVO_UBICACIONES) > 0
-  ):
-    try:
-      df = pd.read_csv(
-          ARCHIVO_UBICACIONES, dtype={"CodigoLimpio": str, "Ubicacion": str}
-      )
-      df["CodigoLimpio"] = df["CodigoLimpio"].apply(limpiar_codigo)
-      df["Ubicacion"] = df["Ubicacion"].astype(str).str.upper().str.strip()
-      if "Cantidad" not in df.columns:
-        df["Cantidad"] = 1
-      df["Cantidad"] = (
-          pd.to_numeric(df["Cantidad"], errors="coerce").fillna(1).astype(int)
-      )
-      df = df.groupby(["CodigoLimpio", "Ubicacion"], as_index=False).agg(
-          {"Cantidad": "sum", "Fecha": "last"}
-      )
-      return df
-    except Exception:
-      pass
-  return pd.DataFrame(
-      columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"]
-  )
-
-
 def guardar_ubicacion(codigo, nueva_ubicacion, cantidad=1):
-  df_ub = cargar_ubicaciones()
   codigo_limpio = limpiar_codigo(codigo)
   nueva_ubicacion = nueva_ubicacion.upper().strip()
+  
   if not codigo_limpio or not nueva_ubicacion:
     return 0
 
-  mask = (df_ub["CodigoLimpio"] == codigo_limpio) & (
-      df_ub["Ubicacion"] == nueva_ubicacion
-  )
-  if mask.any():
-    df_ub.loc[mask, "Cantidad"] = df_ub.loc[mask, "Cantidad"] + cantidad
-    df_ub.loc[mask, "Fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    cant_actual = int(df_ub.loc[mask, "Cantidad"].values[0])
-  else:
-    nueva_fila = pd.DataFrame([{
-        "CodigoLimpio": codigo_limpio,
-        "Ubicacion": nueva_ubicacion,
-        "Cantidad": cantidad,
-        "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }])
-    df_ub = pd.concat([df_ub, nueva_fila], ignore_index=True)
-    cant_actual = cantidad
+  fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+  
+  conn = sqlite3.connect(DB_NAME, timeout=10.0)
+  cursor = conn.cursor()
 
-  df_ub.to_csv(ARCHIVO_UBICACIONES, index=False)
+  cursor.execute(
+      "SELECT cantidad FROM ubicaciones WHERE codigo_limpio = ? AND ubicacion = ?",
+      (codigo_limpio, nueva_ubicacion)
+  )
+  row = cursor.fetchone()
+
+  if row:
+    cant_actual = row[0] + cantidad
+    cursor.execute(
+        "UPDATE ubicaciones SET cantidad = ?, fecha = ? WHERE codigo_limpio = ? AND ubicacion = ?",
+        (cant_actual, fecha_actual, codigo_limpio, nueva_ubicacion)
+    )
+  else:
+    cant_actual = cantidad
+    cursor.execute(
+        "INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha) VALUES (?, ?, ?, ?)",
+        (codigo_limpio, nueva_ubicacion, cant_actual, fecha_actual)
+    )
+
+  conn.commit()
+  conn.close()
   return cant_actual
 
-
 def restar_ubicacion(codigo, ubicacion, cantidad=1):
-  df_ub = cargar_ubicaciones()
   codigo_limpio = limpiar_codigo(codigo)
   ubicacion = ubicacion.upper().strip()
-  if not codigo_limpio or not ubicacion or df_ub.empty:
+  
+  if not codigo_limpio or not ubicacion:
     return 0
 
-  mask = (df_ub["CodigoLimpio"] == codigo_limpio) & (
-      df_ub["Ubicacion"] == ubicacion
-  )
-  if mask.any():
-    cant_actual = int(df_ub.loc[mask, "Cantidad"].values[0])
-    if cant_actual > cantidad:
-      df_ub.loc[mask, "Cantidad"] = cant_actual - cantidad
-      nueva_cant = cant_actual - cantidad
-    else:
-      df_ub = df_ub[~mask]
-      nueva_cant = 0
-    df_ub.to_csv(ARCHIVO_UBICACIONES, index=False)
-    return nueva_cant
-  return 0
+  conn = sqlite3.connect(DB_NAME, timeout=10.0)
+  cursor = conn.cursor()
 
+  cursor.execute(
+      "SELECT cantidad FROM ubicaciones WHERE codigo_limpio = ? AND ubicacion = ?",
+      (codigo_limpio, ubicacion)
+  )
+  row = cursor.fetchone()
+
+  nueva_cant = 0
+  if row:
+    cant_actual = row[0]
+    if cant_actual > cantidad:
+      nueva_cant = cant_actual - cantidad
+      fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+      cursor.execute(
+          "UPDATE ubicaciones SET cantidad = ?, fecha = ? WHERE codigo_limpio = ? AND ubicacion = ?",
+          (nueva_cant, fecha_actual, codigo_limpio, ubicacion)
+      )
+    else:
+      cursor.execute(
+          "DELETE FROM ubicaciones WHERE codigo_limpio = ? AND ubicacion = ?",
+          (codigo_limpio, ubicacion)
+      )
+
+  conn.commit()
+  conn.close()
+  return nueva_cant
 
 # --- INTERFAZ GRÁFICA ---
 class SistemaBodegaApp:
-
   def __init__(self, root):
     self.root = root
     self.root.title("Sistema de Inventario y Bodega")
@@ -146,7 +136,6 @@ class SistemaBodegaApp:
     self.contador_estante = 0
     self.historial_escaneos = []
 
-    # 1. Ubicación
     frame_ub = tk.LabelFrame(
         self.tab_escaneo,
         text=" 1. Ubicación Actual ",
@@ -162,7 +151,6 @@ class SistemaBodegaApp:
         bg="#E0F2FE",
     ).pack(fill="x", padx=10, pady=5)
 
-    # 2. Escáner
     frame_scan = tk.LabelFrame(
         self.tab_escaneo,
         text=" 2. Disparo de Pistola ",
@@ -176,7 +164,6 @@ class SistemaBodegaApp:
     self.entry_scanner.bind("<Return>", self.procesar_disparo_escaneo)
     self.root.bind("<Control-z>", lambda event: self.deshacer_ultimo_escaneo())
 
-    # 3. Botones de Control (RESTAURADOS)
     frame_acciones = tk.Frame(self.tab_escaneo)
     frame_acciones.pack(fill="x", pady=5)
 
@@ -204,7 +191,6 @@ class SistemaBodegaApp:
     )
     btn_del_sel.pack(side="left", padx=5)
 
-    # Estado y Contador
     self.lbl_status = tk.Label(
         self.tab_escaneo,
         text="Listo para escanear.",
@@ -220,7 +206,6 @@ class SistemaBodegaApp:
     )
     self.lbl_contador.pack(fill="x")
 
-    # Tabla
     self.tree_escaneo = ttk.Treeview(
         self.tab_escaneo,
         columns=("codigo", "desc", "talla", "ub", "cant"),
@@ -446,7 +431,6 @@ class SistemaBodegaApp:
         fg="blue",
     )
     self.tree_traspaso.insert("", 0, values=(codigo, desc, origen, destino))
-
 
 if __name__ == "__main__":
   root = tk.Tk()
