@@ -1,12 +1,22 @@
 import base64
 from datetime import datetime
 import os
-import sqlite3
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from supabase import create_client
 
 st.set_page_config(page_title="Sistema de Bodega", layout="wide")
+
+# ==========================================
+# CONFIGURACIÓN SUPABASE
+# ==========================================
+try:
+  url = st.secrets["SUPABASE_URL"]
+  key = st.secrets["SUPABASE_KEY"]
+  supabase = create_client(url, key)
+except Exception as e:
+  st.error(f"🚨 Error crítico al leer las credenciales (Revisa tus Secrets en Streamlit Cloud): {e}")
 
 # ==========================================
 # ESTILO VISUAL (CSS)
@@ -55,84 +65,6 @@ h2, h3, h4 {
     unsafe_allow_html=True,
 )
 
-DB_NAME = "bodega_inventario.db"
-
-# ==========================================
-# CONFIGURACIÓN DE BASE DE DATOS Y USUARIOS
-# ==========================================
-def inicializar_db():
-  conn = sqlite3.connect(DB_NAME, timeout=10.0)
-  cursor = conn.cursor()
-  
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ubicaciones (
-            codigo_limpio TEXT,
-            ubicacion TEXT,
-            cantidad INTEGER,
-            fecha TEXT,
-            PRIMARY KEY (codigo_limpio, ubicacion)
-        )
-    """)
-  
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            username TEXT PRIMARY KEY,
-            password TEXT,
-            rol TEXT
-        )
-    """)
-  
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bitacora_busquedas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario TEXT,
-            codigo TEXT,
-            fecha TEXT
-        )
-    """)
-
-  cursor.execute("SELECT COUNT(*) FROM usuarios")
-  if cursor.fetchone()[0] == 0:
-    cursor.execute("INSERT INTO usuarios (username, password, rol) VALUES (?, ?, ?)", ("admin", "admin123", "admin"))
-    cursor.execute("INSERT INTO usuarios (username, password, rol) VALUES (?, ?, ?)", ("asesor1", "asesor123", "asesor"))
-    cursor.execute("INSERT INTO usuarios (username, password, rol) VALUES (?, ?, ?)", ("asesor2", "asesor123", "asesor"))
-
-  conn.commit()
-  conn.close()
-
-def migrar_csv_a_sqlite():
-  inicializar_db()
-  if os.path.exists("ubicaciones.csv") and os.path.getsize("ubicaciones.csv") > 0:
-    try:
-      df_old = pd.read_csv("ubicaciones.csv")
-      conn = sqlite3.connect(DB_NAME, timeout=10.0)
-      for _, row in df_old.iterrows():
-        col_cod = next((c for c in df_old.columns if "codigo" in str(c).lower()), None)
-        col_ub = next((c for c in df_old.columns if "ubicacion" in str(c).lower() or "ubicación" in str(c).lower()), None)
-        col_cant = next((c for c in df_old.columns if "cantidad" in str(c).lower()), None)
-        
-        if col_cod and col_ub:
-            cod = limpiar_codigo(row.get(col_cod, ""))
-            ub = str(row.get(col_ub, "")).upper().strip()
-            cant = int(row.get(col_cant, 1)) if col_cant else 1
-            fec = str(row.get("Fecha", datetime.now().strftime("%Y-%m-%d %H:%M")))
-            
-            if cod and ub:
-              conn.execute(
-                  """
-                            INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(codigo_limpio, ubicacion) 
-                            DO UPDATE SET cantidad = cantidad + ?, fecha = ?
-                        """,
-                  (cod, ub, cant, fec, cant, fec),
-              )
-      conn.commit()
-      conn.close()
-      os.rename("ubicaciones.csv", "ubicaciones_respaldo_migrado.csv")
-    except Exception as e:
-      st.error(f"⚠️ Error al migrar los datos: {e}")
-
 def limpiar_codigo(val):
   if pd.isna(val):
     return ""
@@ -141,20 +73,16 @@ def limpiar_codigo(val):
     s = s[:-2]
   return s
 
-migrar_csv_a_sqlite()
-
 def registrar_busqueda(usuario, codigo):
   if codigo:
     try:
-      conn = sqlite3.connect(DB_NAME, timeout=10.0)
-      conn.execute(
-          "INSERT INTO bitacora_busquedas (usuario, codigo, fecha) VALUES (?, ?, ?)",
-          (usuario, codigo, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-      )
-      conn.commit()
-      conn.close()
-    except:
-      pass
+      supabase.table("bitacora_busquedas").insert({
+          "usuario": usuario,
+          "codigo": codigo,
+          "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+      }).execute()
+    except Exception as e:
+      pass # Aquí no mostramos error para no interrumpir la navegación
 
 # ==========================================
 # CONTROL DE AUTENTICACIÓN (LOGIN)
@@ -174,23 +102,24 @@ if not st.session_state["autenticado"]:
       submit_login = st.form_submit_button("Entrar", use_container_width=True)
       
       if submit_login:
-        conn = sqlite3.connect(DB_NAME, timeout=10.0)
-        cursor = conn.cursor()
-        cursor.execute("SELECT rol FROM usuarios WHERE username = ? AND password = ?", (usuario_input.strip(), password_input.strip()))
-        row = cursor.fetchone()
-        conn.close()
+        try:
+          res = supabase.table("usuarios").select("rol").eq("username", usuario_input.strip()).eq("password", password_input.strip()).execute()
+          row = res.data
+        except Exception as e:
+          st.error(f"🚨 Error al conectar con la base de datos de usuarios: {e}")
+          row = []
         
         if row:
           st.session_state["autenticado"] = True
           st.session_state["usuario"] = usuario_input.strip()
-          st.session_state["rol"] = row[0]
+          st.session_state["rol"] = row[0]["rol"]
           st.rerun()
         else:
           st.error("⚠️ Usuario o contraseña incorrectos.")
   st.stop()
 
 # ==========================================
-# FUNCIONES DE CARGA Y DATOS
+# FUNCIONES DE CARGA Y DATOS (SUPABASE)
 # ==========================================
 def extraer_talla(referencia):
   if pd.isna(referencia):
@@ -264,25 +193,23 @@ def cargar_inventario():
 
 def cargar_ubicaciones():
   try:
-    conn = sqlite3.connect(DB_NAME, timeout=10.0)
-    df = pd.read_sql(
-        "SELECT codigo_limpio AS CodigoLimpio, ubicacion AS Ubicacion, cantidad AS Cantidad, fecha AS Fecha FROM ubicaciones WHERE cantidad > 0",
-        conn,
-    )
-    conn.close()
-    return df
-  except Exception:
-    return pd.DataFrame(
-        columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"]
-    )
+    response = supabase.table("ubicaciones").select("codigo_limpio, ubicacion, cantidad, fecha").gt("cantidad", 0).execute()
+    if response.data:
+      df = pd.DataFrame(response.data)
+      df = df.rename(columns={"codigo_limpio": "CodigoLimpio", "ubicacion": "Ubicacion", "cantidad": "Cantidad", "fecha": "Fecha"})
+      return df
+    return pd.DataFrame(columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"])
+  except Exception as e:
+    st.error(f"🚨 Error al leer la tabla 'ubicaciones' de Supabase: {e}")
+    return pd.DataFrame(columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"])
 
 def vaciar_estante_completo(ubicacion):
   ub_limpia = ubicacion.upper().strip()
   if ub_limpia:
-    conn = sqlite3.connect(DB_NAME, timeout=10.0)
-    conn.execute("DELETE FROM ubicaciones WHERE ubicacion = ?", (ub_limpia,))
-    conn.commit()
-    conn.close()
+    try:
+      supabase.table("ubicaciones").delete().eq("ubicacion", ub_limpia).execute()
+    except Exception as e:
+      st.error(f"🚨 Error al vaciar estante: {e}")
 
 def guardar_ubicacion(
     codigo,
@@ -296,9 +223,6 @@ def guardar_ubicacion(
   if not codigo_limpio or not nueva_ubicacion:
     return 0
 
-  conn = sqlite3.connect(DB_NAME, timeout=10.0)
-  cursor = conn.cursor()
-
   es_primer_escaneo_reemplazo = False
   if modo_reemplazar and productos_reemplazados_set is not None:
     if codigo_limpio not in productos_reemplazados_set:
@@ -307,50 +231,38 @@ def guardar_ubicacion(
 
   fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-  if es_primer_escaneo_reemplazo:
-    cursor.execute(
-        "DELETE FROM ubicaciones WHERE codigo_limpio = ?", (codigo_limpio,)
-    )
-    cursor.execute(
-        """
-            INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
-            VALUES (?, ?, 1, ?)
-        """,
-        (codigo_limpio, nueva_ubicacion, fecha_actual),
-    )
-    cant_actual = 1
-  else:
-    cursor.execute(
-        """
-            SELECT cantidad FROM ubicaciones 
-            WHERE codigo_limpio = ? AND ubicacion = ?
-        """,
-        (codigo_limpio, nueva_ubicacion),
-    )
-    row = cursor.fetchone()
-
-    if row:
-      cant_actual = row[0] + 1
-      cursor.execute(
-          """
-                UPDATE ubicaciones SET cantidad = ?, fecha = ?
-                WHERE codigo_limpio = ? AND ubicacion = ?
-            """,
-          (cant_actual, fecha_actual, codigo_limpio, nueva_ubicacion),
-      )
-    else:
+  try:
+    if es_primer_escaneo_reemplazo:
+      supabase.table("ubicaciones").delete().eq("codigo_limpio", codigo_limpio).execute()
+      supabase.table("ubicaciones").insert({
+          "codigo_limpio": codigo_limpio,
+          "ubicacion": nueva_ubicacion,
+          "cantidad": 1,
+          "fecha": fecha_actual
+      }).execute()
       cant_actual = 1
-      cursor.execute(
-          """
-                INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
-                VALUES (?, ?, 1, ?)
-            """,
-          (codigo_limpio, nueva_ubicacion, fecha_actual),
-      )
+    else:
+      res = supabase.table("ubicaciones").select("cantidad").eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
+      
+      if res.data:
+        cant_actual = res.data[0]["cantidad"] + 1
+        supabase.table("ubicaciones").update({
+            "cantidad": cant_actual,
+            "fecha": fecha_actual
+        }).eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
+      else:
+        cant_actual = 1
+        supabase.table("ubicaciones").insert({
+            "codigo_limpio": codigo_limpio,
+            "ubicacion": nueva_ubicacion,
+            "cantidad": 1,
+            "fecha": fecha_actual
+        }).execute()
 
-  conn.commit()
-  conn.close()
-  return cant_actual
+    return cant_actual
+  except Exception as e:
+    st.error(f"🚨 Error al guardar ubicación: {e}")
+    return 0
 
 def obtener_resumen_producto(codigo_limpio, df_ub):
   match_ub = df_ub[df_ub["CodigoLimpio"] == codigo_limpio]
@@ -429,7 +341,7 @@ else:
   ])
 
 # ==========================================
-# PESTAÑA 1: ESCÁNER EN VIVO (CON LIMPIEZA DE CACHÉ Y URL)
+# PESTAÑA 1: ESCÁNER EN VIVO
 # ==========================================
 with tab1:
   st.markdown("### Escáner por Código de Barras en Vivo")
@@ -438,7 +350,6 @@ with tab1:
   if "ultimo_codigo" not in st.session_state:
     st.session_state["ultimo_codigo"] = ""
 
-  # Componente HTML con limpieza de instancia al detectar el código
   scanner_html = """
     <div style="display: flex; flex-direction: column; align-items: center;">
         <div id="reader" style="width: 100%; max-width: 420px;"></div>
@@ -455,7 +366,6 @@ with tab1:
             
             document.getElementById('result').innerText = "¡Código detectado: " + decodedText + "!";
             
-            // Detenemos la cámara limpiamente antes de recargar para evitar lecturas fantasmas
             html5QrcodeScanner.clear().then(_ => {
                 const url = new URL(window.parent.location.href);
                 url.searchParams.set('scanned_code', decodedText);
@@ -487,10 +397,8 @@ with tab1:
   
   components.html(scanner_html, height=480)
 
-  # Capturamos el código y limpiamos la URL al instante para que no se quede guardado en caché
   if "scanned_code" in st.query_params:
     codigo_url = limpiar_codigo(st.query_params["scanned_code"])
-    # Borramos el parámetro de la URL de inmediato para evitar que se repita o se trabe
     del st.query_params["scanned_code"]
     if codigo_url:
       st.session_state["ultimo_codigo"] = codigo_url
@@ -1129,13 +1037,7 @@ if st.session_state["rol"] == "admin":
         )
 
         if st.button("🚀 Procesar Ventas y Generar Resurtido", type="primary"):
-          conn_v = sqlite3.connect(DB_NAME, timeout=10.0)
-          cursor_v = conn_v.cursor()
-
-          df_ub_local = pd.read_sql(
-              "SELECT codigo_limpio AS CodigoLimpio, ubicacion AS Ubicacion, cantidad AS Cantidad FROM ubicaciones",
-              conn_v,
-          )
+          df_ub_local = cargar_ubicaciones()
           reporte_resurtido = []
 
           for _, row in df_v.iterrows():
@@ -1207,28 +1109,20 @@ if st.session_state["rol"] == "admin":
                   df_ub_local.drop(idx)
                 cant_restante -= desc_bod
 
-          cursor_v.execute("DELETE FROM ubicaciones")
-          for _, row in df_ub_local.iterrows():
-            if row["Cantidad"] > 0:
-              cursor_v.execute(
-                  """
-                          INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha)
-                          VALUES (?, ?, ?, ?)
-                      """,
-                  (
-                      row["CodigoLimpio"],
-                      row["Ubicacion"],
-                      int(row["Cantidad"]),
-                      datetime.now().strftime("%Y-%m-%d %H:%M"),
-                  ),
-              )
-
-          conn_v.commit()
-          conn_v.close()
-
-          st.success(
-              "✅ Ventas procesadas correctamente y base de datos actualizada."
-          )
+          try:
+            supabase.table("ubicaciones").delete().neq("codigo_limpio", "BORRAR_TODO_FAKE").execute()
+            for _, row in df_ub_local.iterrows():
+              if row["Cantidad"] > 0:
+                supabase.table("ubicaciones").insert({
+                    "codigo_limpio": row["CodigoLimpio"],
+                    "ubicacion": row["Ubicacion"],
+                    "cantidad": int(row["Cantidad"]),
+                    "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")
+                }).execute()
+            
+            st.success("✅ Ventas procesadas correctamente y base de datos actualizada.")
+          except Exception as e:
+            st.error(f"🚨 Error al actualizar la base de datos con el resurtido: {e}")
 
           if reporte_resurtido:
             st.markdown("### 📋 Lista de Resurtido para Bodega")

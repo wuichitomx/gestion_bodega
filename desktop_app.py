@@ -1,22 +1,25 @@
-import sqlite3
 from datetime import datetime
 import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 import pandas as pd
+from supabase import create_client
 
-# Archivo de base de datos SQLite y Catálogo
-DB_NAME = "bodega_inventario.db"
+# --- CONFIGURACIÓN DE SUPABASE ---
+URL = "https://wisvrvrfthxzjmsrkovi.supabase.co"
+KEY = "sb_publishable__MZ6RW9xRxbzBoaSnUx7_A_HVaNUx8s"
+supabase = create_client(URL, KEY)
+
 ARCHIVO_CATALOGO = "RPInv_Extracto_Referencia.csv"
 
-# --- FUNCIONES DE BASE DE DATOS ---
+# --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
 def limpiar_codigo(val):
   if pd.isna(val):
     return ""
-  try:
-    return str(int(float(val)))
-  except:
-    return str(val).strip()
+  s = str(val).strip()
+  if s.endswith(".0"):
+    s = s[:-2]
+  return s
 
 def extraer_talla(referencia):
   if pd.isna(referencia):
@@ -48,31 +51,30 @@ def guardar_ubicacion(codigo, nueva_ubicacion, cantidad=1):
 
   fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
   
-  conn = sqlite3.connect(DB_NAME, timeout=10.0)
-  cursor = conn.cursor()
-
-  cursor.execute(
-      "SELECT cantidad FROM ubicaciones WHERE codigo_limpio = ? AND ubicacion = ?",
-      (codigo_limpio, nueva_ubicacion)
-  )
-  row = cursor.fetchone()
-
-  if row:
-    cant_actual = row[0] + cantidad
-    cursor.execute(
-        "UPDATE ubicaciones SET cantidad = ?, fecha = ? WHERE codigo_limpio = ? AND ubicacion = ?",
-        (cant_actual, fecha_actual, codigo_limpio, nueva_ubicacion)
-    )
-  else:
-    cant_actual = cantidad
-    cursor.execute(
-        "INSERT INTO ubicaciones (codigo_limpio, ubicacion, cantidad, fecha) VALUES (?, ?, ?, ?)",
-        (codigo_limpio, nueva_ubicacion, cant_actual, fecha_actual)
-    )
-
-  conn.commit()
-  conn.close()
-  return cant_actual
+  try:
+    res = supabase.table("ubicaciones").select("cantidad").eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
+    
+    if res.data and len(res.data) > 0:
+      cant_actual = res.data[0]["cantidad"] + cantidad
+      supabase.table("ubicaciones").update({
+          "cantidad": cant_actual,
+          "fecha": fecha_actual
+      }).eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
+    else:
+      cant_actual = cantidad
+      supabase.table("ubicaciones").insert({
+          "codigo_limpio": codigo_limpio,
+          "ubicacion": nueva_ubicacion,
+          "cantidad": cant_actual,
+          "fecha": fecha_actual
+      }).execute()
+      
+    return cant_actual
+  except Exception as e:
+    # AQUÍ ESTÁ LA TRAMPA: Esto lanzará una ventana con el error exacto.
+    messagebox.showerror("Error en Supabase", f"No se pudo guardar.\nDetalle técnico:\n\n{str(e)}")
+    print(f"❌ Error crítico al guardar en Supabase: {e}")
+    return 0
 
 def restar_ubicacion(codigo, ubicacion, cantidad=1):
   codigo_limpio = limpiar_codigo(codigo)
@@ -81,40 +83,32 @@ def restar_ubicacion(codigo, ubicacion, cantidad=1):
   if not codigo_limpio or not ubicacion:
     return 0
 
-  conn = sqlite3.connect(DB_NAME, timeout=10.0)
-  cursor = conn.cursor()
-
-  cursor.execute(
-      "SELECT cantidad FROM ubicaciones WHERE codigo_limpio = ? AND ubicacion = ?",
-      (codigo_limpio, ubicacion)
-  )
-  row = cursor.fetchone()
-
-  nueva_cant = 0
-  if row:
-    cant_actual = row[0]
-    if cant_actual > cantidad:
-      nueva_cant = cant_actual - cantidad
-      fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
-      cursor.execute(
-          "UPDATE ubicaciones SET cantidad = ?, fecha = ? WHERE codigo_limpio = ? AND ubicacion = ?",
-          (nueva_cant, fecha_actual, codigo_limpio, ubicacion)
-      )
-    else:
-      cursor.execute(
-          "DELETE FROM ubicaciones WHERE codigo_limpio = ? AND ubicacion = ?",
-          (codigo_limpio, ubicacion)
-      )
-
-  conn.commit()
-  conn.close()
-  return nueva_cant
+  try:
+    res = supabase.table("ubicaciones").select("cantidad").eq("codigo_limpio", codigo_limpio).eq("ubicacion", ubicacion).execute()
+    
+    nueva_cant = 0
+    if res.data and len(res.data) > 0:
+      cant_actual = res.data[0]["cantidad"]
+      if cant_actual > cantidad:
+        nueva_cant = cant_actual - cantidad
+        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+        supabase.table("ubicaciones").update({
+            "cantidad": nueva_cant,
+            "fecha": fecha_actual
+        }).eq("codigo_limpio", codigo_limpio).eq("ubicacion", ubicacion).execute()
+      else:
+        supabase.table("ubicaciones").delete().eq("codigo_limpio", codigo_limpio).eq("ubicacion", ubicacion).execute()
+    return nueva_cant
+  except Exception as e:
+    messagebox.showerror("Error en Supabase", f"No se pudo restar.\nDetalle técnico:\n\n{str(e)}")
+    print(f"❌ Error crítico al restar en Supabase: {e}")
+    return 0
 
 # --- INTERFAZ GRÁFICA ---
 class SistemaBodegaApp:
   def __init__(self, root):
     self.root = root
-    self.root.title("Sistema de Inventario y Bodega")
+    self.root.title("Sistema de Inventario y Bodega (Nube)")
     self.root.geometry("1000x750")
     self.df_inv = cargar_inventario()
 
