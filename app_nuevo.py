@@ -193,7 +193,8 @@ def cargar_inventario():
 
 def cargar_ubicaciones():
   try:
-    response = supabase.table("ubicaciones").select("codigo_limpio, ubicacion, cantidad, fecha").gt("cantidad", 0).execute()
+    # AQUÍ ESTÁ LA MODIFICACIÓN: .limit(10000)
+    response = supabase.table("ubicaciones").select("codigo_limpio, ubicacion, cantidad, fecha").gt("cantidad", 0).limit(10000).execute()
     if response.data:
       df = pd.DataFrame(response.data)
       df = df.rename(columns={"codigo_limpio": "CodigoLimpio", "ubicacion": "Ubicacion", "cantidad": "Cantidad", "fecha": "Fecha"})
