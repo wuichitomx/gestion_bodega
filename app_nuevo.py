@@ -306,49 +306,41 @@ with tab1:
     st.session_state["ultimo_codigo"] = ""
 
   # Motor con target="_top" para forzar la recarga de la ventana principal y mantener la sesión activa
+  # Motor de escaneo con comunicación silenciosa (Sin recargar página)
   scanner_html = """
     <div style="display: flex; flex-direction: column; align-items: center;">
         <div id="reader" style="width: 100%; max-width: 400px;"></div>
-        <div id="action-container" style="margin-top: 15px; text-align: center;"></div>
+        <div id="status-container" style="margin-top: 15px; font-weight: bold; color: #1E3A8A;"></div>
     </div>
 
     <script src="https://unpkg.com/html5-qrcode"></script>
     <script>
-        let scanningDone = false;
-
         function onScanSuccess(decodedText, decodedResult) {
-            if (scanningDone) return;
-            scanningDone = true;
+            let status = document.getElementById('status-container');
+            status.innerHTML = "Procesando " + decodedText + "...";
             
-            html5QrcodeScanner.clear().then(_ => {
-                let container = document.getElementById('action-container');
-                container.innerHTML = `
-                    <a href="?scanned_code=${decodedText}" target="_top" 
-                    style="display: inline-block; padding: 18px 35px; background-color: #2563EB; 
-                    color: white; text-decoration: none; border-radius: 12px; font-weight: bold; 
-                    font-size: 22px; box-shadow: 0px 4px 10px rgba(0,0,0,0.3);">
-                    🔍 CLIC AQUÍ PARA BUSCAR: ${decodedText}
-                    </a>
-                `;
-            }).catch(error => {
-                console.log(error);
-            });
+            // Enviamos el código a la URL actual pero sin recargar toda la ventana
+            const url = new URL(window.location.href);
+            url.searchParams.set('scanned_code', decodedText);
+            
+            // Forzamos la actualización de la lógica de Streamlit internamente
+            window.parent.postMessage({
+                type: 'streamlit:setComponentValue',
+                value: decodedText
+            }, '*');
+            
+            // Indicamos al usuario que se envió
+            status.innerHTML = "✅ Código enviado: " + decodedText;
         }
 
-        const config = {
-            fps: 30,
-            qrbox: { width: 350, height: 120 },
-            formatsToSupport: [
-                Html5QrcodeSupportedFormats.EAN_13,
-                Html5QrcodeSupportedFormats.CODE_128,
-                Html5QrcodeSupportedFormats.UPC_A
-            ]
-        };
-
+        const config = { fps: 10, qrbox: { width: 350, height: 120 }, formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.UPC_A] };
         let html5QrcodeScanner = new Html5QrcodeScanner("reader", config, false);
-        html5QrcodeScanner.render(onScanSuccess, (error) => {});
+        html5QrcodeScanner.render(onScanSuccess);
     </script>
   """
+  
+  # Usamos un componente de Streamlit que sí permite recibir el valor sin recargar
+  val = components.html(scanner_html, height=450)
   
   components.html(scanner_html, height=450)
 
