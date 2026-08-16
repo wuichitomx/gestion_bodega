@@ -354,7 +354,7 @@ with tab1:
   scanner_html = """
     <div style="display: flex; flex-direction: column; align-items: center;">
         <div id="reader" style="width: 100%; max-width: 420px;"></div>
-        <p id="result" style="font-weight: bold; color: green; margin-top: 10px; font-size: 18px;"></p>
+        <p id="result" style="font-weight: bold; color: green; margin-top: 10px; font-size: 18px; text-align: center;"></p>
     </div>
 
     <script src="https://unpkg.com/html5-qrcode"></script>
@@ -365,29 +365,37 @@ with tab1:
             if (scanningDone) return;
             scanningDone = true;
             
-            document.getElementById('result').innerText = "¡Código detectado: " + decodedText + "!";
+            document.getElementById('result').innerText = "¡Código detectado! Procesando...";
             
             html5QrcodeScanner.clear().then(_ => {
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set('scanned_code', decodedText);
-                window.parent.location.href = url.href;
+                try {
+                    // Intento 1: Redirigir usando el puente seguro (document.referrer)
+                    let parentUrl = new URL(document.referrer);
+                    parentUrl.searchParams.set('scanned_code', decodedText);
+                    window.parent.location.href = parentUrl.href;
+                } catch (error) {
+                    // Intento 2: Paracaídas de emergencia por bloqueo del celular (Botón Gigante)
+                    document.getElementById('result').innerHTML = 
+                        `<br><a href="?scanned_code=${decodedText}" target="_parent" 
+                        style="display: inline-block; padding: 15px 30px; background-color: #2563EB; 
+                        color: white; text-decoration: none; border-radius: 10px; font-weight: bold; 
+                        font-size: 20px; box-shadow: 0px 4px 6px rgba(0,0,0,0.3);">
+                        🔍 BUSCAR CÓDIGO: ${decodedText}
+                        </a><br><p style="color:gray; font-size:14px; margin-top:10px;">Toca el botón azul para buscar.</p>`;
+                }
             }).catch(error => {
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set('scanned_code', decodedText);
-                window.parent.location.href = url.href;
+                console.log(error);
             });
         }
 
         const config = {
-            fps: 15,
-            qrbox: { width: 350, height: 130 },
+            fps: 30,
+            qrbox: { width: 380, height: 120 },
+            aspectRatio: 1.0,
             formatsToSupport: [
                 Html5QrcodeSupportedFormats.EAN_13,
-                Html5QrcodeSupportedFormats.EAN_8,
                 Html5QrcodeSupportedFormats.CODE_128,
-                Html5QrcodeSupportedFormats.UPC_A,
-                Html5QrcodeSupportedFormats.UPC_E,
-                Html5QrcodeSupportedFormats.QR_CODE
+                Html5QrcodeSupportedFormats.UPC_A
             ]
         };
 
@@ -403,6 +411,8 @@ with tab1:
     del st.query_params["scanned_code"]
     if codigo_url:
       st.session_state["ultimo_codigo"] = codigo_url
+      # Esta es la línea mágica que rellena el recuadro en pantalla:
+      st.session_state["barcode_input"] = codigo_url
       registrar_busqueda(st.session_state["usuario"], codigo_url)
       st.rerun()
 
