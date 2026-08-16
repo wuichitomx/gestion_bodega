@@ -19,6 +19,73 @@ except Exception as e:
   st.error(f"🚨 Error crítico al leer las credenciales: {e}")
 
 # ==========================================
+# AUTO-FABRICACIÓN DEL ESCÁNER (¡El truco maestro!)
+# ==========================================
+# Python revisa si existe la carpeta, y si GitHub no la subió, Python la crea.
+if not os.path.exists("escaner"):
+    os.makedirs("escaner")
+
+# Python escribe el código exacto de la cámara para que nunca falte
+with open("escaner/index.html", "w", encoding="utf-8") as f:
+    f.write("""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/streamlit-component-lib@1.3.0/dist/streamlit.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background-color: white;}
+        #reader { width: 100%; max-width: 400px; border: none; }
+        #result { font-weight: bold; color: #1E3A8A; margin-top: 10px; font-size: 18px; font-family: sans-serif; text-align: center;}
+    </style>
+</head>
+<body>
+    <div id="reader"></div>
+    <p id="result">Iniciando cámara...</p>
+
+    <script>
+        let scanningDone = false;
+
+        function onRender(event) {
+            Streamlit.setFrameHeight(450);
+        }
+        Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+        Streamlit.setComponentReady();
+
+        function onScanSuccess(decodedText, decodedResult) {
+            if (scanningDone) return;
+            scanningDone = true;
+            
+            document.getElementById('result').innerText = "¡Código detectado: " + decodedText + "!";
+            
+            // Envía el código silenciosamente a Python
+            Streamlit.setComponentValue(decodedText);
+            
+            // Pausa de 2 segundos antes de volver a leer
+            setTimeout(() => {
+                scanningDone = false;
+                document.getElementById('result').innerText = "Listo para escanear otro...";
+                Streamlit.setComponentValue(null);
+            }, 2000);
+        }
+
+        const config = {
+            fps: 30,
+            qrbox: { width: 350, height: 120 },
+            formatsToSupport: [
+                Html5QrcodeSupportedFormats.EAN_13,
+                Html5QrcodeSupportedFormats.CODE_128,
+                Html5QrcodeSupportedFormats.UPC_A
+            ]
+        };
+
+        let html5QrcodeScanner = new Html5QrcodeScanner("reader", config, false);
+        html5QrcodeScanner.render(onScanSuccess, (error) => {});
+    </script>
+</body>
+</html>""")
+
+# ==========================================
 # ESTILO VISUAL (CSS)
 # ==========================================
 st.markdown(
@@ -300,31 +367,36 @@ else:
 # ==========================================
 with tab1:
   st.markdown("### Escáner por Código de Barras en Vivo")
-  st.info("💡 **Instrucción:** Centra el código de barras dentro del recuadro. La búsqueda se realizará automáticamente.")
+  st.info("💡 **Instrucción:** Centra el código de barras dentro del recuadro. La búsqueda se realizará automáticamente sin cerrar tu sesión.")
 
   if "ultimo_codigo" not in st.session_state:
     st.session_state["ultimo_codigo"] = ""
+  if "codigo_previo_cam" not in st.session_state:
+    st.session_state["codigo_previo_cam"] = ""
 
-  # Motor Oficial (Conecta con tu carpeta 'escaner' subida a GitHub)
+  # Ejecutamos el componente oficial fabricado por Python
   try:
     escaner_vivo = components.declare_component("escaner", path="escaner")
     codigo_detectado = escaner_vivo(key="camara_oficial")
 
     if codigo_detectado:
       codigo_limpio_cam = limpiar_codigo(codigo_detectado)
-      # Evitamos parpadeos asegurándonos de procesarlo solo si es un código nuevo
       if st.session_state.get("codigo_previo_cam") != codigo_limpio_cam:
           st.session_state["codigo_previo_cam"] = codigo_limpio_cam
           st.session_state["ultimo_codigo"] = codigo_limpio_cam
+          st.session_state["barcode_input"] = ""
           registrar_busqueda(st.session_state["usuario"], codigo_limpio_cam)
-          st.rerun() # Esto refresca solo los datos, NO el navegador, tu sesión sigue intacta
+          st.rerun()
+    else:
+      # Se reinicia la memoria del escáner para que puedas volver a leer el mismo producto
+      st.session_state["codigo_previo_cam"] = ""
+
   except Exception as e:
-    st.error("Cargando la cámara... Si no aparece, asegúrate de que la carpeta 'escaner' ya se sincronizó en GitHub.")
+    st.error(f"Inicializando cámara... recarga la página en unos segundos. Detalles: {e}")
 
   def procesar_escaneo_consulta():
     codigo_leido = limpiar_codigo(st.session_state["barcode_input"])
     st.session_state["ultimo_codigo"] = codigo_leido
-    st.session_state["codigo_previo_cam"] = codigo_leido # Sincronizamos
     st.session_state["barcode_input"] = ""
     registrar_busqueda(st.session_state["usuario"], codigo_leido)
 
