@@ -93,7 +93,7 @@ if "autenticado" not in st.session_state:
   st.session_state["rol"] = ""
 
 if not st.session_state["autenticado"]:
-  st.markdown("<h2 style='text-align: center; color: #1E3A8A; margin-top: 50px;'>🔐 Iniciar Sesión - Sistema de Bodega</h2>", unsafe_allow_html=True,)
+  st.markdown("<h2 style='text-align: center; color: #1E3A8A; margin-top: 50px;'>🔐 Iniciar Sesión - Sistema de Bodega</h2>", unsafe_allow_html=True)
   col1, col2, col3 = st.columns([1, 2, 1])
   with col2:
     with st.form("login_form"):
@@ -305,7 +305,7 @@ with tab1:
   if "ultimo_codigo" not in st.session_state:
     st.session_state["ultimo_codigo"] = ""
 
-  # Motor robusto incrustado directo en una sola pieza (A prueba de fallos en la nube)
+  # Motor con target="_top" para forzar la recarga de la ventana principal y mantener la sesión activa
   scanner_html = """
     <div style="display: flex; flex-direction: column; align-items: center;">
         <div id="reader" style="width: 100%; max-width: 400px;"></div>
@@ -321,10 +321,9 @@ with tab1:
             scanningDone = true;
             
             html5QrcodeScanner.clear().then(_ => {
-                // Creamos el botón de acceso directo infalible
                 let container = document.getElementById('action-container');
                 container.innerHTML = `
-                    <a href="?scanned_code=${decodedText}" target="_self" 
+                    <a href="?scanned_code=${decodedText}" target="_top" 
                     style="display: inline-block; padding: 18px 35px; background-color: #2563EB; 
                     color: white; text-decoration: none; border-radius: 12px; font-weight: bold; 
                     font-size: 22px; box-shadow: 0px 4px 10px rgba(0,0,0,0.3);">
