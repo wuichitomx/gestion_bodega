@@ -1,4 +1,4 @@
-"""import base64
+import base64
 from datetime import datetime
 import os
 import pandas as pd
@@ -21,7 +21,7 @@ except Exception as e:
 # ESTILO VISUAL (CSS)
 # ==========================================
 st.markdown(
-    \"\"\"
+    """
 <style>
 [data-testid="stAppViewContainer"] * {
     color: #000000 !important;
@@ -60,7 +60,7 @@ h2, h3, h4 {
     color: #000000 !important;
 }
 </style>
-\"\"\",
+""",
     unsafe_allow_html=True,
 )
 
@@ -275,12 +275,12 @@ with st.sidebar:
 if os.path.exists("Adidas-logo.png"):
   img_b64 = base64.b64encode(open("Adidas-logo.png", "rb").read()).decode()
   st.markdown(
-      f\"\"\"
+      f"""
     <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 20px;">
         <img src="data:image/png;base64,{img_b64}" style="width: 110px; height: auto;">
         <h1 style="color: #1E3A8A; font-weight: 900; margin: 0; font-size: 42px; line-height: 1;">Gestión de Bodega</h1>
     </div>
-    \"\"\",
+    """,
       unsafe_allow_html=True,
   )
 else:
@@ -498,7 +498,3 @@ if st.session_state["rol"] == "admin":
       col_cant = col_c2.selectbox("Columna Cantidad:", df_v.columns)
       if st.button("🚀 Procesar"):
         st.success("Ventas procesadas.")
-"""
-with open('app_nuevo_limpio.py', 'w', encoding='utf-8') as f:
-    f.write(code)
-print("[file-tag: app_nuevo_limpio.py]")
