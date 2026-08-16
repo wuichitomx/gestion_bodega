@@ -367,25 +367,25 @@ with tab1:
             
             document.getElementById('result').innerText = "¡Código detectado! Procesando...";
             
-            html5QrcodeScanner.clear().then(_ => {
-                try {
-                    // Intento 1: Redirigir usando el puente seguro (document.referrer)
-                    let parentUrl = new URL(document.referrer);
-                    parentUrl.searchParams.set('scanned_code', decodedText);
-                    window.parent.location.href = parentUrl.href;
-                } catch (error) {
-                    // Intento 2: Paracaídas de emergencia por bloqueo del celular (Botón Gigante)
-                    document.getElementById('result').innerHTML = 
-                        `<br><a href="?scanned_code=${decodedText}" target="_parent" 
-                        style="display: inline-block; padding: 15px 30px; background-color: #2563EB; 
-                        color: white; text-decoration: none; border-radius: 10px; font-weight: bold; 
-                        font-size: 20px; box-shadow: 0px 4px 6px rgba(0,0,0,0.3);">
-                        🔍 BUSCAR CÓDIGO: ${decodedText}
-                        </a><br><p style="color:gray; font-size:14px; margin-top:10px;">Toca el botón azul para buscar.</p>`;
-                }
-            }).catch(error => {
-                console.log(error);
-            });
+            try {
+                // Obtenemos la URL raíz de tu app para saltarnos la "cajita de cristal"
+                let appUrl = new URL(document.referrer);
+                appUrl.searchParams.set('scanned_code', decodedText);
+                
+                // Intento 1: Redirigir toda la página automáticamente
+                window.top.location.href = appUrl.href;
+                
+                // Intento 2: Paracaídas de emergencia a prueba de balas (con target="_top")
+                document.getElementById('result').innerHTML = 
+                    `<br><a href="${appUrl.href}" target="_top" 
+                    style="display: inline-block; padding: 15px 30px; background-color: #2563EB; 
+                    color: white; text-decoration: none; border-radius: 10px; font-weight: bold; 
+                    font-size: 20px; box-shadow: 0px 4px 6px rgba(0,0,0,0.3);">
+                    🔍 BUSCAR CÓDIGO: ${decodedText}
+                    </a><br><p style="color:gray; font-size:14px; margin-top:10px;">Toca el botón azul si no avanza solo.</p>`;
+            } catch (error) {
+                document.getElementById('result').innerText = "Copia el código manualmente: " + decodedText;
+            }
         }
 
         const config = {
@@ -408,14 +408,15 @@ with tab1:
 
   if "scanned_code" in st.query_params:
     codigo_url = limpiar_codigo(st.query_params["scanned_code"])
+    
+    # Eliminamos el parámetro de la URL para que no se cicle
     del st.query_params["scanned_code"]
+    
     if codigo_url:
       st.session_state["ultimo_codigo"] = codigo_url
-      # Esta es la línea mágica que rellena el recuadro en pantalla:
-      st.session_state["barcode_input"] = codigo_url
+      st.session_state["barcode_input"] = ""  # Limpiamos el recuadro por precaución
       registrar_busqueda(st.session_state["usuario"], codigo_url)
       st.rerun()
-
   def procesar_escaneo_consulta():
     codigo_leido = limpiar_codigo(st.session_state["barcode_input"])
     st.session_state["ultimo_codigo"] = codigo_leido
