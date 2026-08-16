@@ -82,7 +82,7 @@ def registrar_busqueda(usuario, codigo):
           "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
       }).execute()
     except Exception as e:
-      pass # Aquí no mostramos error para no interrumpir la navegación
+      pass 
 
 # ==========================================
 # CONTROL DE AUTENTICACIÓN (LOGIN)
@@ -193,7 +193,6 @@ def cargar_inventario():
 
 def cargar_ubicaciones():
   try:
-    # AQUÍ ESTÁ LA MODIFICACIÓN: .limit(10000)
     response = supabase.table("ubicaciones").select("codigo_limpio, ubicacion, cantidad, fecha").gt("cantidad", 0).limit(10000).execute()
     if response.data:
       df = pd.DataFrame(response.data)
@@ -351,72 +350,19 @@ with tab1:
   if "ultimo_codigo" not in st.session_state:
     st.session_state["ultimo_codigo"] = ""
 
-  scanner_html = """
-    <div style="display: flex; flex-direction: column; align-items: center;">
-        <div id="reader" style="width: 100%; max-width: 420px;"></div>
-        <p id="result" style="font-weight: bold; color: green; margin-top: 10px; font-size: 18px; text-align: center;"></p>
-    </div>
+  # --- NUEVO PUENTE DIRECTO DEL ESCÁNER ---
+  try:
+    escaner_vivo = components.declare_component("escaner", path="escaner")
+    codigo_detectado = escaner_vivo(key="camara_celular")
 
-    <script src="https://unpkg.com/html5-qrcode"></script>
-    <script>
-        let scanningDone = false;
+    if codigo_detectado:
+      codigo_limpio_cam = limpiar_codigo(codigo_detectado)
+      st.session_state["ultimo_codigo"] = codigo_limpio_cam
+      registrar_busqueda(st.session_state["usuario"], codigo_limpio_cam)
+  except Exception as e:
+    st.error(f"Falta la carpeta 'escaner' con su archivo index.html. Error: {e}")
+  # ----------------------------------------
 
-        function onScanSuccess(decodedText, decodedResult) {
-            if (scanningDone) return;
-            scanningDone = true;
-            
-            document.getElementById('result').innerText = "¡Código detectado! Procesando...";
-            
-            try {
-                // Obtenemos la URL raíz de tu app para saltarnos la "cajita de cristal"
-                let appUrl = new URL(document.referrer);
-                appUrl.searchParams.set('scanned_code', decodedText);
-                
-                // Intento 1: Redirigir toda la página automáticamente
-                window.top.location.href = appUrl.href;
-                
-                // Intento 2: Paracaídas de emergencia a prueba de balas (con target="_top")
-                document.getElementById('result').innerHTML = 
-                    `<br><a href="${appUrl.href}" target="_top" 
-                    style="display: inline-block; padding: 15px 30px; background-color: #2563EB; 
-                    color: white; text-decoration: none; border-radius: 10px; font-weight: bold; 
-                    font-size: 20px; box-shadow: 0px 4px 6px rgba(0,0,0,0.3);">
-                    🔍 BUSCAR CÓDIGO: ${decodedText}
-                    </a><br><p style="color:gray; font-size:14px; margin-top:10px;">Toca el botón azul si no avanza solo.</p>`;
-            } catch (error) {
-                document.getElementById('result').innerText = "Copia el código manualmente: " + decodedText;
-            }
-        }
-
-        const config = {
-            fps: 30,
-            qrbox: { width: 380, height: 120 },
-            aspectRatio: 1.0,
-            formatsToSupport: [
-                Html5QrcodeSupportedFormats.EAN_13,
-                Html5QrcodeSupportedFormats.CODE_128,
-                Html5QrcodeSupportedFormats.UPC_A
-            ]
-        };
-
-        let html5QrcodeScanner = new Html5QrcodeScanner("reader", config, false);
-        html5QrcodeScanner.render(onScanSuccess, (error) => {});
-    </script>
-  """
-  
-  components.html(scanner_html, height=480)
-
-  if "scanned_code" in st.query_params:
-    codigo_url = limpiar_codigo(st.query_params["scanned_code"])
-    
-    # Eliminamos el parámetro de la URL para que no se cicle
-    del st.query_params["scanned_code"]
-    
-    if codigo_url:
-      st.session_state["ultimo_codigo"] = codigo_url
-      st.session_state["barcode_input"] = ""  # Limpiamos el recuadro por precaución
-      registrar_busqueda(st.session_state["usuario"], codigo_url)
-      st.rerun()
   def procesar_escaneo_consulta():
     codigo_leido = limpiar_codigo(st.session_state["barcode_input"])
     st.session_state["ultimo_codigo"] = codigo_leido
