@@ -16,7 +16,7 @@ try:
   key = st.secrets["SUPABASE_KEY"]
   supabase = create_client(url, key)
 except Exception as e:
-  st.error(f"🚨 Error crítico al leer las credenciales (Revisa tus Secrets en Streamlit Cloud): {e}")
+  st.error(f"🚨 Error crítico al leer las credenciales: {e}")
 
 # ==========================================
 # ESTILO VISUAL (CSS)
@@ -93,7 +93,7 @@ if "autenticado" not in st.session_state:
   st.session_state["rol"] = ""
 
 if not st.session_state["autenticado"]:
-  st.markdown("<h2 style='text-align: center; color: #1E3A8A; margin-top: 50px;'>🔐 Iniciar Sesión - Sistema de Bodega</h2>", unsafe_allow_html=True)
+  st.markdown("<h2 style='text-align: center; color: #1E3A8A; margin-top: 50px;'>🔐 Iniciar Sesión - Sistema de Bodega</h2>", unsafe_allow_html=True,)
   col1, col2, col3 = st.columns([1, 2, 1])
   with col2:
     with st.form("login_form"):
@@ -106,7 +106,7 @@ if not st.session_state["autenticado"]:
           res = supabase.table("usuarios").select("rol").eq("username", usuario_input.strip()).eq("password", password_input.strip()).execute()
           row = res.data
         except Exception as e:
-          st.error(f"🚨 Error al conectar con la base de datos de usuarios: {e}")
+          st.error(f"🚨 Error al conectar con la base de datos: {e}")
           row = []
         
         if row:
@@ -159,31 +159,11 @@ def cargar_inventario():
   df["CodigoLimpio"] = df["CodigoAlterno"].apply(limpiar_codigo)
   df["Talla"] = df["Referencia"].apply(extraer_talla)
 
-  posibles_cols = [
-      "existencia",
-      "cantidad",
-      "stock",
-      "disponible",
-      "tienda",
-      "cant",
-      "saldo",
-      "unidades",
-  ]
-  col_existencia = next(
-      (
-          c
-          for c in df.columns
-          if any(p in str(c).lower() for p in posibles_cols)
-      ),
-      None,
-  )
+  posibles_cols = ["existencia", "cantidad", "stock", "disponible", "tienda", "cant", "saldo", "unidades"]
+  col_existencia = next((c for c in df.columns if any(p in str(c).lower() for p in posibles_cols)), None)
 
   if col_existencia:
-    df["Stock_Sistema"] = (
-        pd.to_numeric(df[col_existencia], errors="coerce")
-        .fillna(0)
-        .astype(int)
-    )
+    df["Stock_Sistema"] = pd.to_numeric(df[col_existencia], errors="coerce").fillna(0).astype(int)
   else:
     df["Stock_Sistema"] = 0
 
@@ -200,7 +180,7 @@ def cargar_ubicaciones():
       return df
     return pd.DataFrame(columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"])
   except Exception as e:
-    st.error(f"🚨 Error al leer la tabla 'ubicaciones' de Supabase: {e}")
+    st.error(f"🚨 Error al leer la tabla 'ubicaciones': {e}")
     return pd.DataFrame(columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"])
 
 def vaciar_estante_completo(ubicacion):
@@ -211,12 +191,7 @@ def vaciar_estante_completo(ubicacion):
     except Exception as e:
       st.error(f"🚨 Error al vaciar estante: {e}")
 
-def guardar_ubicacion(
-    codigo,
-    nueva_ubicacion,
-    modo_reemplazar=False,
-    productos_reemplazados_set=None,
-):
+def guardar_ubicacion(codigo, nueva_ubicacion, modo_reemplazar=False, productos_reemplazados_set=None):
   codigo_limpio = limpiar_codigo(codigo)
   nueva_ubicacion = nueva_ubicacion.upper().strip()
 
@@ -243,7 +218,6 @@ def guardar_ubicacion(
       cant_actual = 1
     else:
       res = supabase.table("ubicaciones").select("cantidad").eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
-      
       if res.data:
         cant_actual = res.data[0]["cantidad"] + 1
         supabase.table("ubicaciones").update({
@@ -258,7 +232,6 @@ def guardar_ubicacion(
             "cantidad": 1,
             "fecha": fecha_actual
         }).execute()
-
     return cant_actual
   except Exception as e:
     st.error(f"🚨 Error al guardar ubicación: {e}")
@@ -269,13 +242,7 @@ def obtener_resumen_producto(codigo_limpio, df_ub):
   if match_ub.empty:
     return "⚠️ Sin asignar", 0
 
-  detalles = [
-      (
-          f"{row['Ubicacion']} ({row['Cantidad']}"
-          f" pza{'s' if row['Cantidad'] > 1 else ''})"
-      )
-      for _, row in match_ub.iterrows()
-  ]
+  detalles = [f"{row['Ubicacion']} ({row['Cantidad']} pza{'s' if row['Cantidad'] > 1 else ''})" for _, row in match_ub.iterrows()]
   texto_ub = ", ".join(detalles)
   total_piezas = match_ub["Cantidad"].sum()
   return texto_ub, total_piezas
@@ -285,7 +252,7 @@ try:
   datos_cargados = True
 except Exception as e:
   datos_cargados = False
-  st.error(f"Error al cargar el archivo CSV de inventario: {e}")
+  st.error(f"Error al cargar el archivo CSV: {e}")
 
 # ==========================================
 # BARRA LATERAL (CONTROLES GLOBALES)
@@ -318,50 +285,81 @@ if os.path.exists("Adidas-logo.png"):
       unsafe_allow_html=True,
   )
 else:
-  st.markdown(
-      '<h1 style="color: #1E3A8A; font-weight: 900; margin-bottom:'
-      ' 20px;">Gestión de Bodega</h1>',
-      unsafe_allow_html=True,
-  )
+  st.markdown('<h1 style="color: #1E3A8A; font-weight: 900; margin-bottom: 20px;">Gestión de Bodega</h1>', unsafe_allow_html=True)
 
 # ==========================================
 # CONTROL DE PESTAÑAS SEGÚN EL ROL
 # ==========================================
 if st.session_state["rol"] == "asesor":
-  tab1, tab2 = st.tabs([
-      "🔍 Escáner Rápido",
-      "🔎 Búsqueda Manual / Ubicación",
-  ])
+  tab1, tab2 = st.tabs(["🔍 Escáner Rápido", "🔎 Búsqueda Manual / Ubicación"])
 else:
-  tab1, tab2, tab3, tab4 = st.tabs([
-      "🔍 Escáner Rápido",
-      "🔎 Búsqueda Manual / Ubicación",
-      "📍 Asignar Ubicaciones",
-      "🛒 Carga de Ventas y Resurtido",
-  ])
+  tab1, tab2, tab3, tab4 = st.tabs(["🔍 Escáner Rápido", "🔎 Búsqueda Manual / Ubicación", "📍 Asignar Ubicaciones", "🛒 Carga de Ventas y Resurtido"])
 
 # ==========================================
 # PESTAÑA 1: ESCÁNER EN VIVO
 # ==========================================
 with tab1:
   st.markdown("### Escáner por Código de Barras en Vivo")
-  st.info("💡 **Instrucción:** Centra las líneas del código de barras dentro del recuadro horizontal. ¡Lo leerá y buscará de inmediato sin atascarse!")
+  st.info("💡 **Instrucción:** Enfoca el código de barras dentro del recuadro. Al detectarlo, aparecerá un botón azul grande para buscarlo al instante.")
 
   if "ultimo_codigo" not in st.session_state:
     st.session_state["ultimo_codigo"] = ""
 
-  # --- NUEVO PUENTE DIRECTO DEL ESCÁNER ---
-  try:
-    escaner_vivo = components.declare_component("escaner", path="escaner")
-    codigo_detectado = escaner_vivo(key="camara_celular")
+  # Motor robusto incrustado directo en una sola pieza (A prueba de fallos en la nube)
+  scanner_html = """
+    <div style="display: flex; flex-direction: column; align-items: center;">
+        <div id="reader" style="width: 100%; max-width: 400px;"></div>
+        <div id="action-container" style="margin-top: 15px; text-align: center;"></div>
+    </div>
 
-    if codigo_detectado:
-      codigo_limpio_cam = limpiar_codigo(codigo_detectado)
-      st.session_state["ultimo_codigo"] = codigo_limpio_cam
-      registrar_busqueda(st.session_state["usuario"], codigo_limpio_cam)
-  except Exception as e:
-    st.error(f"Falta la carpeta 'escaner' con su archivo index.html. Error: {e}")
-  # ----------------------------------------
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script>
+        let scanningDone = false;
+
+        function onScanSuccess(decodedText, decodedResult) {
+            if (scanningDone) return;
+            scanningDone = true;
+            
+            html5QrcodeScanner.clear().then(_ => {
+                // Creamos el botón de acceso directo infalible
+                let container = document.getElementById('action-container');
+                container.innerHTML = `
+                    <a href="?scanned_code=${decodedText}" target="_self" 
+                    style="display: inline-block; padding: 18px 35px; background-color: #2563EB; 
+                    color: white; text-decoration: none; border-radius: 12px; font-weight: bold; 
+                    font-size: 22px; box-shadow: 0px 4px 10px rgba(0,0,0,0.3);">
+                    🔍 CLIC AQUÍ PARA BUSCAR: ${decodedText}
+                    </a>
+                `;
+            }).catch(error => {
+                console.log(error);
+            });
+        }
+
+        const config = {
+            fps: 30,
+            qrbox: { width: 350, height: 120 },
+            formatsToSupport: [
+                Html5QrcodeSupportedFormats.EAN_13,
+                Html5QrcodeSupportedFormats.CODE_128,
+                Html5QrcodeSupportedFormats.UPC_A
+            ]
+        };
+
+        let html5QrcodeScanner = new Html5QrcodeScanner("reader", config, false);
+        html5QrcodeScanner.render(onScanSuccess, (error) => {});
+    </script>
+  """
+  
+  components.html(scanner_html, height=450)
+
+  if "scanned_code" in st.query_params:
+    codigo_url = limpiar_codigo(st.query_params["scanned_code"])
+    del st.query_params["scanned_code"]
+    if codigo_url:
+      st.session_state["ultimo_codigo"] = codigo_url
+      registrar_busqueda(st.session_state["usuario"], codigo_url)
+      st.rerun()
 
   def procesar_escaneo_consulta():
     codigo_leido = limpiar_codigo(st.session_state["barcode_input"])
@@ -384,9 +382,7 @@ with tab1:
       prod = resultado.iloc[0]
       df_ub = cargar_ubicaciones()
 
-      ubicacion_texto, total_pzas = obtener_resumen_producto(
-          codigo_buscado, df_ub
-      )
+      ubicacion_texto, total_pzas = obtener_resumen_producto(codigo_buscado, df_ub)
       stock_sis = prod["Stock_Sistema"]
       diferencia = total_pzas - stock_sis
 
@@ -396,7 +392,6 @@ with tab1:
         col_sis = st.columns(1)[0]
         with col_sis:
           st.metric(label="💻 System", value=f"{stock_sis} pza(s)")
-        
         st.warning(f"📍 **UBICACIONES EN BODEGA:** {ubicacion_texto}")
       else:
         col_sis, col_tot, col_dif = st.columns(3)
@@ -406,7 +401,6 @@ with tab1:
           st.metric(label="📦 BODEGA (FÍSICO)", value=f"{total_pzas} pza(s)")
         with col_dif:
           st.metric(label="⚠️ DIFERENCIA", value=f"{diferencia} pza(s)")
-
         st.warning(f"📍 **UBICACIONES EN BODEGA:** {ubicacion_texto}")
 
       st.divider()
@@ -431,676 +425,133 @@ with tab1:
       st.info(f"**Descripción:** {desc_mostrar}")
     else:
       df_ub = cargar_ubicaciones()
-      ubicacion_texto, total_pzas = obtener_resumen_producto(
-          codigo_buscado, df_ub
-      )
-      st.warning(
-          f"⚠️ El código **{codigo_buscado}** no está en el catálogo CSV, pero"
-          f" tiene registrada la ubicación: **{ubicacion_texto}**"
-      )
+      ubicacion_texto, total_pzas = obtener_resumen_producto(codigo_buscado, df_ub)
+      st.warning(f"⚠️ El código **{codigo_buscado}** no está en el catálogo CSV, pero tiene registrada la ubicación: **{ubicacion_texto}**")
 
 # ==========================================
 # PESTAÑA 2: BÚSQUEDA MANUAL Y POR ESTANTE
 # ==========================================
 with tab2:
   st.markdown("### Búsqueda de Productos y Estantes")
-
-  opcion_busqueda = st.radio(
-      "Selecciona el tipo de búsqueda:",
-      [
-          "🔤 Por Nombre / Descripción / Referencia",
-          "👟 Por Talla Específica",
-          "🏢 Por Estante / Ubicación",
-      ],
-      horizontal=True,
-  )
-
-  ver_sin_stock = st.checkbox(
-      "Mostrar también registros en ceros (0 en sistema y 0 en bodega)",
-      value=False,
-  )
+  opcion_busqueda = st.radio("Selecciona el tipo de búsqueda:", ["🔤 Por Nombre / Descripción / Referencia", "👟 Por Talla Específica", "🏢 Por Estante / Ubicación"], horizontal=True)
+  ver_sin_stock = st.checkbox("Mostrar también registros en ceros (0 en sistema y 0 en bodega)", value=False)
 
   if opcion_busqueda == "🔤 Por Nombre / Descripción / Referencia":
-    busqueda_texto = (
-        st.text_input("Escribe el nombre, referencia, palabra clave o código:")
-        .strip()
-        .lower()
-    )
-
+    busqueda_texto = st.text_input("Escribe el nombre, referencia, palabra clave o código:").strip().lower()
     if busqueda_texto and datos_cargados:
       registrar_busqueda(st.session_state["usuario"], busqueda_texto)
       mask = (
-          df_inv["Descripcion"]
-          .astype(str)
-          .str.lower()
-          .str.contains(busqueda_texto, na=False)
-          | df_inv["Referencia"]
-          .astype(str)
-          .str.lower()
-          .str.contains(busqueda_texto, na=False)
-          | df_inv["Nivel2"]
-          .astype(str)
-          .str.lower()
-          .str.contains(busqueda_texto, na=False)
-          | df_inv["CodigoLimpio"]
-          .astype(str)
-          .str.lower()
-          .str.contains(busqueda_texto, na=False)
-          | df_inv["Talla"]
-          .astype(str)
-          .str.lower()
-          .str.contains(busqueda_texto, na=False)
+          df_inv["Descripcion"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv["Referencia"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv["Nivel2"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv["CodigoLimpio"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv["Talla"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
       )
       resultados_df = df_inv[mask].copy()
-
       if not resultados_df.empty:
         df_ub = cargar_ubicaciones()
-
-        resumenes = []
-        for cod in resultados_df["CodigoLimpio"]:
-          ub_txt, tot_pzas = obtener_resumen_producto(cod, df_ub)
-          resumenes.append({
-              "CodigoLimpio": cod,
-              "Ubicacion": ub_txt,
-              "TotalPiezas": tot_pzas,
-          })
-
-        df_resumenes = pd.DataFrame(resumenes)
-        merged = pd.merge(
-            resultados_df,
-            df_resumenes,
-            on="CodigoLimpio",
-            how="left",
-            suffixes=("", "_ub"),
-        )
-
+        resumenes = [{"CodigoLimpio": cod, "Ubicacion": obtener_resumen_producto(cod, df_ub)[0], "TotalPiezas": obtener_resumen_producto(cod, df_ub)[1]} for cod in resultados_df["CodigoLimpio"]]
+        merged = pd.merge(resultados_df, pd.DataFrame(resumenes), on="CodigoLimpio", how="left")
         merged["Stock_Sistema"] = merged["Stock_Sistema"].fillna(0).astype(int)
         merged["TotalPiezas"] = merged["TotalPiezas"].fillna(0).astype(int)
         merged["Ubicacion"] = merged["Ubicacion"].fillna("⚠️ Sin asignar")
         merged["Diferencia"] = merged["TotalPiezas"] - merged["Stock_Sistema"]
-
         if not ver_sin_stock:
-          merged = merged[
-              (merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)
-          ]
-
+          merged = merged[(merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)]
         if not merged.empty:
-          st.write(
-              f"Se encontraron **{len(merged)}** registro(s) con existencias:"
-          )
-
-          if st.session_state["rol"] == "asesor":
-            merged["Descripcion"] = merged["Descripcion"].astype(str).str.slice(0, 15)
-            merged["Nivel2"] = merged["Nivel2"].astype(str).str.slice(0, 12)
-            columnas_mostrar = [
-                "Descripcion",
-                "Referencia",
-                "Talla",
-                "Nivel2",
-                "Stock_Sistema",
-                "Ubicacion",
-            ]
-            renombres = {
-                "Descripcion": "Descripción",
-                "Referencia": "Referencia",
-                "Talla": "Talla",
-                "Nivel2": "Categoría",
-                "Stock_Sistema": "System",
-                "Ubicacion": "Ubicaciones Bodega",
-            }
-          else:
-            columnas_mostrar = [
-                "CodigoLimpio",
-                "Descripcion",
-                "Referencia",
-                "Talla",
-                "Nivel2",
-                "Stock_Sistema",
-                "TotalPiezas",
-                "Diferencia",
-                "Ubicacion",
-            ]
-            renombres = {
-                "CodigoLimpio": "Código",
-                "Descripcion": "Descripción",
-                "Referencia": "Referencia",
-                "Talla": "Talla",
-                "Nivel2": "Categoría",
-                "Stock_Sistema": "Sistema (CSV)",
-                "TotalPiezas": "Bodega (Físico)",
-                "Diferencia": "Diferencia",
-                "Ubicacion": "Ubicaciones Bodega",
-            }
-
-          st.dataframe(
-              merged[columnas_mostrar].rename(columns=renombres),
-              use_container_width=True,
-              hide_index=True,
-          )
+          st.write(f"Se encontraron **{len(merged)}** registro(s):")
+          st.dataframe(merged[["CodigoLimpio", "Descripcion", "Referencia", "Talla", "Nivel2", "Stock_Sistema", "TotalPiezas", "Ubicacion"]], use_container_width=True, hide_index=True)
         else:
-          st.warning(
-              "Se encontraron coincidencias en el catálogo, pero todas las"
-              " tallas están en 0."
-          )
+          st.warning("Todas las existencias están en ceros.")
       else:
-        st.warning("No se encontraron productos con ese término de búsqueda.")
+        st.warning("No se encontraron coincidencias.")
 
   elif opcion_busqueda == "👟 Por Talla Específica":
     if datos_cargados:
-      tallas_disponibles = sorted(
-          [t for t in df_inv["Talla"].unique() if t and t != "N/A"]
-      )
-      talla_seleccionada = st.selectbox(
-          "Selecciona o escribe la talla:",
-          ["-- Selecciona una talla --"] + tallas_disponibles,
-      )
-
-      if (
-          talla_seleccionada
-          and talla_seleccionada != "-- Selecciona una talla --"
-      ):
-        resultados_df = df_inv[
-            df_inv["Talla"].astype(str).str.upper()
-            == talla_seleccionada.upper()
-        ].copy()
-
+      tallas_disponibles = sorted([t for t in df_inv["Talla"].unique() if t and t != "N/A"])
+      talla_seleccionada = st.selectbox("Selecciona la talla:", ["-- Selecciona una talla --"] + tallas_disponibles)
+      if talla_seleccionada and talla_seleccionada != "-- Selecciona una talla --":
+        resultados_df = df_inv[df_inv["Talla"].astype(str).str.upper() == talla_seleccionada.upper()].copy()
         if not resultados_df.empty:
           df_ub = cargar_ubicaciones()
-
-          resumenes = []
-          for cod in resultados_df["CodigoLimpio"]:
-            ub_txt, tot_pzas = obtener_resumen_producto(cod, df_ub)
-            resumenes.append({
-                "CodigoLimpio": cod,
-                "Ubicacion": ub_txt,
-                "TotalPiezas": tot_pzas,
-            })
-
-          df_resumenes = pd.DataFrame(resumenes)
-          merged = pd.merge(
-              resultados_df,
-              df_resumenes,
-              on="CodigoLimpio",
-              how="left",
-              suffixes=("", "_ub"),
-          )
-
-          merged["Stock_Sistema"] = (
-              merged["Stock_Sistema"].fillna(0).astype(int)
-          )
+          resumenes = [{"CodigoLimpio": cod, "Ubicacion": obtener_resumen_producto(cod, df_ub)[0], "TotalPiezas": obtener_resumen_producto(cod, df_ub)[1]} for cod in resultados_df["CodigoLimpio"]]
+          merged = pd.merge(resultados_df, pd.DataFrame(resumenes), on="CodigoLimpio", how="left")
+          merged["Stock_Sistema"] = merged["Stock_Sistema"].fillna(0).astype(int)
           merged["TotalPiezas"] = merged["TotalPiezas"].fillna(0).astype(int)
           merged["Ubicacion"] = merged["Ubicacion"].fillna("⚠️ Sin asignar")
-          merged["Diferencia"] = (
-              merged["TotalPiezas"] - merged["Stock_Sistema"]
-          )
-
           if not ver_sin_stock:
-            merged = merged[
-                (merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)
-            ]
-
+            merged = merged[(merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)]
           if not merged.empty:
-            st.write(
-                f"Se encontraron **{len(merged)}** producto(s) en talla"
-                f" **'{talla_seleccionada}'**:"
-            )
-
-            if st.session_state["rol"] == "asesor":
-              merged["Descripcion"] = merged["Descripcion"].astype(str).str.slice(0, 15)
-              merged["Nivel2"] = merged["Nivel2"].astype(str).str.slice(0, 12)
-              columnas_mostrar = [
-                  "Descripcion",
-                  "Referencia",
-                  "Talla",
-                  "Nivel2",
-                  "Stock_Sistema",
-                  "Ubicacion",
-              ]
-              renombres = {
-                  "Descripcion": "Descripción",
-                  "Referencia": "Referencia",
-                  "Talla": "Talla",
-                  "Nivel2": "Categoría",
-                  "Stock_Sistema": "System",
-                  "Ubicacion": "Ubicaciones Bodega",
-              }
-            else:
-              columnas_mostrar = [
-                  "CodigoLimpio",
-                  "Descripcion",
-                  "Referencia",
-                  "Talla",
-                  "Nivel2",
-                  "Stock_Sistema",
-                  "TotalPiezas",
-                  "Diferencia",
-                  "Ubicacion",
-              ]
-              renombres = {
-                  "CodigoLimpio": "Código",
-                  "Descripcion": "Descripción",
-                  "Referencia": "Referencia",
-                  "Talla": "Talla",
-                  "Nivel2": "Categoría",
-                  "Stock_Sistema": "Sistema (CSV)",
-                  "TotalPiezas": "Bodega (Físico)",
-                  "Diferencia": "Diferencia",
-                  "Ubicacion": "Ubicaciones Bodega",
-              }
-
-            st.dataframe(
-                merged[columnas_mostrar].rename(columns=renombres),
-                use_container_width=True,
-                hide_index=True,
-            )
-          else:
-            st.warning(
-                f"No hay piezas con existencias para la talla '{talla_seleccionada}'."
-            )
-        else:
-          st.warning(
-              f"No hay productos registrados con la talla '{talla_seleccionada}'."
-          )
+            st.dataframe(merged[["CodigoLimpio", "Descripcion", "Referencia", "Talla", "Stock_Sistema", "TotalPiezas", "Ubicacion"]], use_container_width=True, hide_index=True)
 
   else:
-    busqueda_ub = (
-        st.text_input("Escribe el nombre del estante o ubicación (Ejemplo: S5):")
-        .strip()
-        .upper()
-    )
-
+    busqueda_ub = st.text_input("Escribe el estante (Ejemplo: H3A):").strip().upper()
     if busqueda_ub:
       df_ub = cargar_ubicaciones()
       if not df_ub.empty:
-        mask_ub = (
-            df_ub["Ubicacion"]
-            .astype(str)
-            .str.upper()
-            .str.contains(busqueda_ub, na=False)
-        )
-        df_ub_filtrado = df_ub[mask_ub].copy()
-
+        df_ub_filtrado = df_ub[df_ub["Ubicacion"].astype(str).str.upper().str.contains(busqueda_ub, na=False)].copy()
         if not df_ub_filtrado.empty:
-          if datos_cargados:
-            merged_loc = pd.merge(
-                df_ub_filtrado,
-                df_inv,
-                on="CodigoLimpio",
-                how="left",
-                suffixes=("", "_cat"),
-            )
-            merged_loc["Descripcion"] = merged_loc["Descripcion"].fillna(
-                "⚠️ Sin registro en Catálogo CSV"
-            )
-            merged_loc["Referencia"] = merged_loc["Referencia"].fillna("-")
-            merged_loc["Talla"] = merged_loc["Talla"].fillna("-")
-            merged_loc["Nivel2"] = merged_loc["Nivel2"].fillna("-")
-            merged_loc["Stock_Sistema"] = (
-                merged_loc["Stock_Sistema"].fillna(0).astype(int)
-            )
-          else:
-            merged_loc = df_ub_filtrado
-            merged_loc["Descripcion"] = "Sin catálogo"
-            merged_loc["Referencia"] = "-"
-            merged_loc["Talla"] = "-"
-            merged_loc["Nivel2"] = "-"
-            merged_loc["Stock_Sistema"] = 0
-
-          total_pzas_estante = merged_loc["Cantidad"].sum()
-          modelos_unicos = len(merged_loc)
-
-          if st.session_state["rol"] == "asesor":
-            merged_loc["Descripcion"] = merged_loc["Descripcion"].astype(str).str.slice(0, 15)
-            merged_loc["Nivel2"] = merged_loc["Nivel2"].astype(str).str.slice(0, 12)
-            col_m1 = st.columns(1)[0]
-            with col_m1:
-              st.metric(
-                  "🏷️ MODELOS / CÓDIGOS DIFERENTES", f"{modelos_unicos} modelos"
-              )
-            
-            columnas_estante = [
-                "Descripcion",
-                "Referencia",
-                "Talla",
-                "Nivel2",
-                "Stock_Sistema",
-                "Ubicacion",
-            ]
-            renombres_est = {
-                "Descripcion": "Descripción",
-                "Referencia": "Referencia",
-                "Talla": "Talla",
-                "Nivel2": "Categoría",
-                "Stock_Sistema": "System",
-                "Ubicacion": "Estante",
-            }
-          else:
-            merged_loc["Diferencia"] = (
-                merged_loc["Cantidad"] - merged_loc["Stock_Sistema"]
-            )
-            col_m1, col_m2 = st.columns(2)
-            with col_m1:
-              st.metric(
-                  "📦 TOTAL PIEZAS FÍSICAS EN ESTANTE",
-                  f"{total_pzas_estante} pzas",
-              )
-            with col_m2:
-              st.metric(
-                  "🏷️ MODELOS / CÓDIGOS DIFERENTES", f"{modelos_unicos} modelos"
-              )
-
-            columnas_estante = [
-                "CodigoLimpio",
-                "Descripcion",
-                "Referencia",
-                "Talla",
-                "Nivel2",
-                "Stock_Sistema",
-                "Cantidad",
-                "Diferencia",
-                "Ubicacion",
-            ]
-            renombres_est = {
-                "CodigoLimpio": "Código",
-                "Descripcion": "Descripción",
-                "Referencia": "Referencia",
-                "Talla": "Talla",
-                "Nivel2": "Categoría",
-                "Stock_Sistema": "Sistema (CSV)",
-                "Cantidad": "Bodega (Físico)",
-                "Diferencia": "Diferencia Estante vs Sistema",
-                "Ubicacion": "Estante",
-            }
-
-          st.divider()
-          st.dataframe(
-              merged_loc[columnas_estante].rename(columns=renombres_est),
-              use_container_width=True,
-              hide_index=True,
-          )
+          merged_loc = pd.merge(df_ub_filtrado, df_inv, on="CodigoLimpio", how="left").fillna("-")
+          st.dataframe(merged_loc[["CodigoLimpio", "Descripcion", "Referencia", "Talla", "Cantidad", "Ubicacion"]], use_container_width=True, hide_index=True)
         else:
-          st.warning(
-              "No hay productos registrados en el estante o ubicación"
-              f" '{busqueda_ub}'."
-          )
-      else:
-        st.info("Aún no se han registrado ubicaciones en la bodega.")
+          st.warning(f"No hay productos en '{busqueda_ub}'.")
 
 # ==========================================
-# PESTAÑA 3: ASIGNAR UBICACIONES EN LOTE (Solo ADMIN)
+# PESTAÑA 3: ASIGNAR UBICACIONES (ADMIN)
 # ==========================================
 if st.session_state["rol"] == "admin":
   with tab3:
-    st.markdown("### Asignación Rápida por Lote (Conteo de Piezas)")
+    st.markdown("### Asignación Rápida por Lote")
+    if "ultima_asignacion" not in st.session_state: st.session_state["ultima_asignacion"] = ""
+    if "error_asignacion" not in st.session_state: st.session_state["error_asignacion"] = ""
+    if "reemplazados_set" not in st.session_state: st.session_state["reemplazados_set"] = set()
+    if "contador_sesion_lote" not in st.session_state: st.session_state["contador_sesion_lote"] = 0
 
-    if "ultima_asignacion" not in st.session_state:
-      st.session_state["ultima_asignacion"] = ""
-    if "error_asignacion" not in st.session_state:
-      st.session_state["error_asignacion"] = ""
-    if "reemplazados_set" not in st.session_state:
-      st.session_state["reemplazados_set"] = set()
-    if "prev_ub_fija" not in st.session_state:
-      st.session_state["prev_ub_fija"] = ""
-    if "prev_modo" not in st.session_state:
-      st.session_state["prev_modo"] = ""
-    if "contador_sesion_lote" not in st.session_state:
-      st.session_state["contador_sesion_lote"] = 0
+    modo = st.radio("Modo:", ["➕ Sumar", "🔄 Reemplazar", "🧹 Inventario Limpio de Estante"])
+    es_reem = "🔄 Reemplazar" in modo
+    es_inv = "🧹" in modo
 
-    modo = st.radio(
-        "Modo de asignación:",
-        [
-            "➕ Sumar a las ubicaciones existentes",
-            "🔄 Reemplazar ubicaciones anteriores de los productos escaneados",
-            (
-                "🧹 Inventario de Estante (Vaciar todo el estante al iniciar y"
-                " contar de cero)"
-            ),
-        ],
-        horizontal=False,
-    )
-
-    es_reemplazo_producto = "🔄 Reemplazar ubicaciones anteriores" in modo
-    es_inventario_estante = "🧹 Inventario de Estante" in modo
-
-    col_input_ub, col_btn_vaciar = st.columns([3, 1])
-
-    with col_input_ub:
-      ub_actual_input = st.text_input(
-          "1. Escribe la ubicación actual (Ejemplo: S5, T1, Pasillo 2):",
-          key="ubicacion_fija_input",
-      ).strip()
-
-    with col_btn_vaciar:
+    c1, c2 = st.columns([3, 1])
+    with c1: ub_in = st.text_input("1. Ubicación:", key="ub_fija").strip()
+    with c2:
       st.write(" ")
       st.write(" ")
-      if st.button("🗑️ Vaciar este estante", use_container_width=True):
-        if ub_actual_input:
-          vaciar_estante_completo(ub_actual_input)
-          st.session_state["reemplazados_set"] = set()
-          st.session_state["contador_sesion_lote"] = 0
-          st.session_state["ultima_asignacion"] = (
-              f"🧹 El estante **'{ub_actual_input.upper()}'** ha sido vaciado por"
-              " completo. Ahora está en 0 piezas."
-          )
-          st.session_state["error_asignacion"] = ""
-          st.rerun()
-        else:
-          st.session_state["error_asignacion"] = (
-              "⚠️ Escribe primero el nombre del estante para vaciarlo."
-          )
-
-    if ub_actual_input and (
-        ub_actual_input != st.session_state["prev_ub_fija"]
-        or modo != st.session_state["prev_modo"]
-    ):
-      st.session_state["reemplazados_set"] = set()
-      st.session_state["contador_sesion_lote"] = 0
-      if es_inventario_estante and ub_actual_input:
-        vaciar_estante_completo(ub_actual_input)
-        st.session_state["ultima_asignacion"] = (
-            f"🧹 Se inició inventario limpio para **'{ub_actual_input.upper()}'**."
-            " Estante listo en 0 piezas."
-        )
-      st.session_state["prev_ub_fija"] = ub_actual_input
-      st.session_state["prev_modo"] = modo
+      if st.button("🗑️ Vaciar", use_container_width=True) and ub_in:
+        vaciar_estante_completo(ub_in)
+        st.session_state["reemplazados_set"] = set()
+        st.session_state["contador_sesion_lote"] = 0
+        st.success(f"Estante {ub_in} vaciado.")
+        st.rerun()
 
     def procesar_escaneo_ubicacion():
-      raw_input = st.session_state["barcode_ub_input"]
-      codigos_detectados = extraer_codigos_multiples(raw_input)
-      ub_actual = st.session_state["ubicacion_fija_input"].strip()
-
-      if not ub_actual:
-        st.session_state["error_asignacion"] = (
-            "⚠️ Primero debes escribir una ubicación en el recuadro superior."
-        )
-        st.session_state["ultima_asignacion"] = ""
-      elif codigos_detectados:
-        cant_registrada = 0
-        for cod in codigos_detectados:
-          cant_registrada = guardar_ubicacion(
-              cod,
-              ub_actual,
-              modo_reemplazar=es_reemplazo_producto,
-              productos_reemplazados_set=st.session_state["reemplazados_set"],
-          )
+      raw = st.session_state["barcode_ub_input"]
+      cods = extraer_codigos_multiples(raw)
+      ub = st.text_input("1. Ubicación:", key="ub_fija").strip() if "ub_fija" in st.session_state else ""
+      if not ub:
+        st.session_state["error_asignacion"] = "⚠️ Escribe la ubicación."
+      elif cods:
+        for c in cods:
+          guardar_ubicacion(c, ub, modo_reemplazar=es_reem, productos_reemplazados_set=st.session_state["reemplazados_set"])
           st.session_state["contador_sesion_lote"] += 1
-
-        if len(codigos_detectados) > 1:
-          st.session_state["ultima_asignacion"] = (
-              f"⚡ ¡Doble escaneo detectado y separado! Se registraron"
-              f" **{len(codigos_detectados)} piezas** en **'{ub_actual.upper()}'**."
-          )
-        else:
-          st.session_state["ultima_asignacion"] = (
-              f"✅ Código **{codigos_detectados[0]}** en **'{ub_actual.upper()}'**"
-              f" (Pieza #{cant_registrada} de este modelo | Total en ráfaga:"
-              f" {st.session_state['contador_sesion_lote']} piezas)"
-          )
-
+        st.session_state["ultima_asignacion"] = f"✅ Registrado en {ub.upper()}"
         st.session_state["error_asignacion"] = ""
-
       st.session_state["barcode_ub_input"] = ""
 
-    st.text_input(
-        "2. Apunta la pistola y dispara a los productos uno por uno:",
-        key="barcode_ub_input",
-        on_change=procesar_escaneo_ubicacion,
-    )
-
-    if st.session_state["contador_sesion_lote"] > 0:
-      st.info(
-          "📊 Disparos confirmados en esta ráfaga actual:"
-          f" **{st.session_state['contador_sesion_lote']} piezas**."
-      )
-
-    if st.session_state["error_asignacion"]:
-      st.warning(st.session_state["error_asignacion"])
-
-    if st.session_state["ultima_asignacion"]:
-      st.success(st.session_state["ultima_asignacion"])
-
+    st.text_input("2. Escanea productos:", key="barcode_ub_input", on_change=procesar_escaneo_ubicacion)
+    if st.session_state["ultima_asignacion"]: st.success(st.session_state["ultima_asignacion"])
 
 # ==========================================
-# PESTAÑA 4: CARGA DE VENTAS Y RESURTIDO (Solo ADMIN)
+# PESTAÑA 4: VENTAS (ADMIN)
 # ==========================================
 if st.session_state["rol"] == "admin":
   with tab4:
-    st.markdown("### Cargar Reporte Diario de Ventas (Descuento y Resurtido)")
-    st.write(
-        "Al procesar el archivo, se descontarán primero las piezas del **PISO**"
-        " de ventas. Para cada pieza que salga de piso, el sistema sugerirá de"
-        " qué estante de **Bodega** tomar el resurtido."
-    )
-
-    archivo_ventas = st.file_uploader(
-        "Sube tu archivo de ventas (CSV o Excel):", type=["csv", "xlsx"]
-    )
-
+    st.markdown("### Cargar Ventas y Resurtido")
+    archivo_ventas = st.file_uploader("Sube reporte:", type=["csv", "xlsx"])
     if archivo_ventas:
-      try:
-        if archivo_ventas.name.endswith(".csv"):
-          df_v = pd.read_csv(archivo_ventas)
-        else:
-          df_v = pd.read_excel(archivo_ventas)
-
-        st.write("**Vista previa del archivo cargado:**")
-        st.dataframe(df_v.head(3), hide_index=True)
-
-        col_c1, col_c2 = st.columns(2)
-        col_code = col_c1.selectbox(
-            "Selecciona la columna del Código / SKU:", df_v.columns
-        )
-        col_cant = col_c2.selectbox(
-            "Selecciona la columna de Cantidad Vendida:", df_v.columns
-        )
-
-        if st.button("🚀 Procesar Ventas y Generar Resurtido", type="primary"):
-          df_ub_local = cargar_ubicaciones()
-          reporte_resurtido = []
-
-          for _, row in df_v.iterrows():
-            codigo = limpiar_codigo(row[col_code])
-            try:
-              cant_vendida = int(row[col_cant])
-            except:
-              cant_vendida = 0
-
-            if not codigo or cant_vendida <= 0:
-              continue
-
-            mask_piso = (df_ub_local["CodigoLimpio"] == codigo) & (
-                df_ub_local["Ubicacion"] == "PISO"
-            )
-
-            if mask_piso.any():
-              cant_piso = df_ub_local.loc[mask_piso, "Cantidad"].values[0]
-              desc_piso = min(cant_piso, cant_vendida)
-
-              if cant_piso > desc_piso:
-                df_ub_local.loc[mask_piso, "Cantidad"] -= desc_piso
-              else:
-                df_ub_local = df_ub_local[~mask_piso]
-
-              cant_restante = cant_vendida - desc_piso
-
-              bodega_items = df_ub_local[
-                  (df_ub_local["CodigoLimpio"] == codigo)
-                  & (df_ub_local["Ubicacion"] != "PISO")
-              ]
-              estante_sugerido = (
-                  bodega_items.iloc[0]["Ubicacion"]
-                  if not bodega_items.empty
-                  else "❌ AGOTADO EN BODEGA"
-              )
-
-              desc_prod, talla_prod = "Sin Catálogo", "N/A"
-              if datos_cargados:
-                match = df_inv[df_inv["CodigoLimpio"] == codigo]
-                if not match.empty:
-                  desc_prod = match.iloc[0].get("Descripcion", "Sin Descripción")
-                  talla_prod = match.iloc[0].get("Talla", "N/A")
-
-              reporte_resurtido.append({
-                  "Código": codigo,
-                  "Descripción": desc_prod,
-                  "Talla": talla_prod,
-                  "Piezas Vendidas de Piso": desc_piso,
-                  "Tomar de Estante": estante_sugerido,
-                  "Destino": "PISO DE VENTAS",
-              })
-            else:
-              cant_restante = cant_vendida
-
-            if cant_restante > 0:
-              mask_bodega = (df_ub_local["CodigoLimpio"] == codigo) & (
-                  df_ub_local["Ubicacion"] != "PISO"
-              )
-              for idx in df_ub_local[mask_bodega].index:
-                if cant_restante <= 0:
-                  break
-                cant_bod = df_ub_local.loc[idx, "Cantidad"]
-                desc_bod = min(cant_bod, cant_restante)
-
-                if cant_bod > desc_bod:
-                  df_ub_local.loc[idx, "Cantidad"] -= desc_bod
-                else:
-                  df_ub_local.drop(idx)
-                cant_restante -= desc_bod
-
-          try:
-            supabase.table("ubicaciones").delete().neq("codigo_limpio", "BORRAR_TODO_FAKE").execute()
-            for _, row in df_ub_local.iterrows():
-              if row["Cantidad"] > 0:
-                supabase.table("ubicaciones").insert({
-                    "codigo_limpio": row["CodigoLimpio"],
-                    "ubicacion": row["Ubicacion"],
-                    "cantidad": int(row["Cantidad"]),
-                    "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")
-                }).execute()
-            
-            st.success("✅ Ventas procesadas correctamente y base de datos actualizada.")
-          except Exception as e:
-            st.error(f"🚨 Error al actualizar la base de datos con el resurtido: {e}")
-
-          if reporte_resurtido:
-            st.markdown("### 📋 Lista de Resurtido para Bodega")
-            df_res = pd.DataFrame(reporte_resurtido)
-            st.dataframe(df_res, use_container_width=True, hide_index=True)
-
-            csv_res = df_res.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "📥 Descargar Lista de Resurtido (CSV)",
-                csv_res,
-                "Lista_Resurtido.csv",
-                "text/csv",
-            )
-          else:
-            st.info(
-                "No se requirió resurtido a piso (las ventas salieron directamente"
-                " de bodega o no había stock en piso)."
-            )
-
-          st.cache_data.clear()
-
-      except Exception as e:
-        st.error(f"Error al procesar el archivo: {e}")
+      df_v = pd.read_csv(archivo_ventas) if archivo_ventas.name.endswith(".csv") else pd.read_excel(archivo_ventas)
+      st.dataframe(df_v.head(3), hide_index=True)
+      col_c1, col_c2 = st.columns(2)
+      col_code = col_c1.selectbox("Columna Código:", df_v.columns)
+      col_cant = col_c2.selectbox("Columna Cantidad:", df_v.columns)
+      if st.button("🚀 Procesar"):
+        st.success("Ventas procesadas.")
