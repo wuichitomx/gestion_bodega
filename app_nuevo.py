@@ -300,61 +300,31 @@ else:
 # ==========================================
 with tab1:
   st.markdown("### Escáner por Código de Barras en Vivo")
-  st.info("💡 **Instrucción:** Enfoca el código de barras dentro del recuadro. Al detectarlo, aparecerá un botón azul grande para buscarlo al instante.")
+  st.info("💡 **Instrucción:** Centra el código de barras dentro del recuadro. La búsqueda se realizará automáticamente.")
 
   if "ultimo_codigo" not in st.session_state:
     st.session_state["ultimo_codigo"] = ""
 
-  # Motor con target="_top" para forzar la recarga de la ventana principal y mantener la sesión activa
-  # Motor de escaneo con comunicación silenciosa (Sin recargar página)
-  scanner_html = """
-    <div style="display: flex; flex-direction: column; align-items: center;">
-        <div id="reader" style="width: 100%; max-width: 400px;"></div>
-        <div id="status-container" style="margin-top: 15px; font-weight: bold; color: #1E3A8A;"></div>
-    </div>
+  # Motor Oficial (Conecta con tu carpeta 'escaner' subida a GitHub)
+  try:
+    escaner_vivo = components.declare_component("escaner", path="escaner")
+    codigo_detectado = escaner_vivo(key="camara_oficial")
 
-    <script src="https://unpkg.com/html5-qrcode"></script>
-    <script>
-        function onScanSuccess(decodedText, decodedResult) {
-            let status = document.getElementById('status-container');
-            status.innerHTML = "Procesando " + decodedText + "...";
-            
-            // Enviamos el código a la URL actual pero sin recargar toda la ventana
-            const url = new URL(window.location.href);
-            url.searchParams.set('scanned_code', decodedText);
-            
-            // Forzamos la actualización de la lógica de Streamlit internamente
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: decodedText
-            }, '*');
-            
-            // Indicamos al usuario que se envió
-            status.innerHTML = "✅ Código enviado: " + decodedText;
-        }
-
-        const config = { fps: 10, qrbox: { width: 350, height: 120 }, formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.UPC_A] };
-        let html5QrcodeScanner = new Html5QrcodeScanner("reader", config, false);
-        html5QrcodeScanner.render(onScanSuccess);
-    </script>
-  """
-  
-  # Usamos un componente de Streamlit que sí permite recibir el valor sin recargar
-  val = components.html(scanner_html, height=450)
-  
-  components.html(scanner_html, height=450)
-
-  if "scanned_code" in st.query_params:
-    codigo_url = limpiar_codigo(st.query_params["scanned_code"])
-    del st.query_params["scanned_code"]
-    if codigo_url:
-      st.session_state["ultimo_codigo"] = codigo_url
-      registrar_busqueda(st.session_state["usuario"], codigo_url)
-      st.rerun()
+    if codigo_detectado:
+      codigo_limpio_cam = limpiar_codigo(codigo_detectado)
+      # Evitamos parpadeos asegurándonos de procesarlo solo si es un código nuevo
+      if st.session_state.get("codigo_previo_cam") != codigo_limpio_cam:
+          st.session_state["codigo_previo_cam"] = codigo_limpio_cam
+          st.session_state["ultimo_codigo"] = codigo_limpio_cam
+          registrar_busqueda(st.session_state["usuario"], codigo_limpio_cam)
+          st.rerun() # Esto refresca solo los datos, NO el navegador, tu sesión sigue intacta
+  except Exception as e:
+    st.error("Cargando la cámara... Si no aparece, asegúrate de que la carpeta 'escaner' ya se sincronizó en GitHub.")
 
   def procesar_escaneo_consulta():
     codigo_leido = limpiar_codigo(st.session_state["barcode_input"])
     st.session_state["ultimo_codigo"] = codigo_leido
+    st.session_state["codigo_previo_cam"] = codigo_leido # Sincronizamos
     st.session_state["barcode_input"] = ""
     registrar_busqueda(st.session_state["usuario"], codigo_leido)
 
