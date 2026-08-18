@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-st.set_page_config(page_title="Sistema de Bodega - Pruebas", layout="wide")
+st.set_page_config(page_title="Sistema de Bodega", layout="wide")
 
 # ==========================================
 # CONFIGURACIÓN SUPABASE
@@ -64,6 +64,9 @@ h2, h3, h4 {
     unsafe_allow_html=True,
 )
 
+# ==========================================
+# FUNCIONES AUXILIARES
+# ==========================================
 def limpiar_codigo(val):
   if pd.isna(val):
     return ""
@@ -118,7 +121,7 @@ if not st.session_state["autenticado"]:
   st.stop()
 
 # ==========================================
-# FUNCIONES DE CARGA Y DATOS (SUPABASE)
+# FUNCIONES DE CARGA Y DATOS (SUPABASE / LOCAL)
 # ==========================================
 def extraer_talla(referencia):
   if pd.isna(referencia):
@@ -254,7 +257,7 @@ except Exception as e:
   st.error(f"Error al cargar el archivo CSV: {e}")
 
 # ==========================================
-# BARRA LATERAL (CONTROLES GLOBALES Y CARGA 2X1)
+# BARRA LATERAL GLOBALES
 # ==========================================
 with st.sidebar:
   st.markdown(f"### 👤 Usuario: {st.session_state['usuario']}")
@@ -266,62 +269,24 @@ with st.sidebar:
     st.session_state["rol"] = ""
     st.rerun()
 
-  st.markdown("---")
-  st.markdown("### ⚙️ Opciones del Sistema")
-  
-  with st.expander("🔄 Recargar Inventario CSV", expanded=False):
-    st.write("Sube el archivo del ERP para actualizar localmente y sincronizar en Supabase.")
-    archivo_erp = st.file_uploader("Selecciona el CSV", type=["csv"], key="uploader_erp")
-    
-    if archivo_erp is not None:
-      if st.button("Procesar y Subir a la Nube", use_container_width=True):
-        with st.spinner("Procesando y sincronizando con Supabase..."):
-          try:
-            # 1. Guardar copia local para Streamlit
-            with open("RPInv_Extracto_Referencia.csv", "wb") as f:
-                f.write(archivo_erp.getbuffer())
-            
-            # 2. Leer y limpiar el archivo
-            df = pd.read_csv(archivo_erp, skiprows=5, encoding="utf-8-sig", dtype=str)
-            if "CodigoAlterno" not in df.columns:
-                df = pd.read_csv(archivo_erp, encoding="utf-8-sig", dtype=str)
-            
-            df = df.dropna(subset=["CodigoAlterno"])
-            df["CodigoLimpio"] = df["CodigoAlterno"].apply(limpiar_codigo)
-            df["Talla"] = df["Referencia"].apply(extraer_talla)
-            
-            posibles_cols = ["existencia", "cantidad", "stock", "disponible", "tienda", "cant", "saldo", "unidades"]
-            col_existencia = next((c for c in df.columns if any(p in str(c).lower() for p in posibles_cols)), None)
-            if col_existencia:
-                df["Stock_Sistema"] = pd.to_numeric(df[col_existencia], errors="coerce").fillna(0).astype(int)
-            else:
-                df["Stock_Sistema"] = 0
-            
-            # 3. Preparar los datos para la tabla catalogo_erp
-            df_supa = pd.DataFrame()
-            df_supa['codigo_limpio'] = df['CodigoLimpio']
-            df_supa['referencia'] = df.get('Referencia', '').fillna('-')
-            df_supa['descripcion'] = df.get('Descripcion', '').fillna('-')
-            df_supa['talla'] = df['Talla']
-            df_supa['nivel1'] = df.get('Nivel1', '').fillna('-')
-            df_supa['nivel2'] = df.get('Nivel2', '').fillna('-')
-            df_supa['nivel3'] = df.get('Nivel3', '').fillna('-')
-            df_supa['nivel4'] = df.get('Nivel4', '').fillna('-')
-            df_supa['stock_sistema'] = df['Stock_Sistema']
-            
-            df_supa = df_supa.drop_duplicates(subset=["codigo_limpio"])
-            datos_a_subir = df_supa.to_dict(orient='records')
-            
-            # 4. Subir a Supabase en lotes de 1000
-            for i in range(0, len(datos_a_subir), 1000):
-                lote = datos_a_subir[i:i+1000]
-                supabase.table("catalogo_erp").upsert(lote).execute()
-
-            st.success("✅ ¡Actualizado en Local y en Supabase!")
-            st.cache_data.clear() 
-            
-          except Exception as e:
-            st.error(f"Error al sincronizar: {e}")
+  if st.session_state["rol"] == "admin":
+      st.markdown("---")
+      st.markdown("### ⚙️ Opciones del Sistema")
+      
+      with st.expander("🔄 Recargar Inventario CSV", expanded=False):
+        st.write("Sube el archivo del ERP para actualizar localmente.")
+        archivo_erp = st.file_uploader("Selecciona el CSV", type=["csv"], key="uploader_erp")
+        
+        if archivo_erp is not None:
+          if st.button("Actualizar Archivo Local", use_container_width=True):
+            with st.spinner("Procesando..."):
+              try:
+                with open("RPInv_Extracto_Referencia.csv", "wb") as f:
+                    f.write(archivo_erp.getbuffer())
+                st.success("✅ ¡Actualizado en Local!")
+                st.cache_data.clear() 
+              except Exception as e:
+                st.error(f"Error al sincronizar: {e}")
 
 if os.path.exists("Adidas-logo.png"):
   img_b64 = base64.b64encode(open("Adidas-logo.png", "rb").read()).decode()
@@ -343,7 +308,7 @@ else:
 if st.session_state["rol"] == "asesor":
   tab1, tab2 = st.tabs(["🔍 Escáner Rápido", "🔎 Búsqueda Manual / Ubicación"])
 else:
-  tab1, tab2, tab3, tab4 = st.tabs(["🔍 Escáner Rápido", "🔎 Búsqueda Manual / Ubicación", "📍 Asignar Ubicaciones", "🛒 Carga de Ventas y Resurtido"])
+  tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Escáner Rápido", "🔎 Búsqueda Manual / Ubicación", "📍 Asignar Ubicaciones", "🛒 Carga de Ventas y Resurtido", "👥 Gestión de Usuarios"])
 
 # ==========================================
 # PESTAÑA 1: ESCÁNER EN VIVO
@@ -434,13 +399,19 @@ with tab2:
     busqueda_texto = st.text_input("Escribe el nombre, referencia, palabra clave o código:").strip().lower()
     if busqueda_texto and datos_cargados:
       registrar_busqueda(st.session_state["usuario"], busqueda_texto)
+      
+      # Filtro ampliado para buscar en todos los niveles del ERP
       mask = (
           df_inv["Descripcion"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
           | df_inv["Referencia"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv["Nivel2"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel1", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel2", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel3", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel4", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
           | df_inv["CodigoLimpio"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
           | df_inv["Talla"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
       )
+      
       resultados_df = df_inv[mask].copy()
       if not resultados_df.empty:
         df_ub = cargar_ubicaciones()
@@ -549,3 +520,73 @@ if st.session_state["rol"] == "admin":
       col_cant = col_c2.selectbox("Columna Cantidad:", df_v.columns)
       if st.button("🚀 Procesar"):
         st.success("Ventas procesadas.")
+
+# ==========================================
+# PESTAÑA 5: GESTIÓN DE USUARIOS (ADMIN)
+# ==========================================
+if st.session_state["rol"] == "admin":
+  with tab5:
+    st.markdown("### 👥 Administración de Usuarios")
+    st.info("Agrega nuevos miembros a tu equipo o elimina cuentas existentes.")
+
+    # 1. Cargar y mostrar usuarios actuales
+    try:
+      res = supabase.table("usuarios").select("username, rol").execute()
+      if res.data:
+        df_usuarios = pd.DataFrame(res.data)
+        st.markdown("#### Usuarios Activos")
+        st.dataframe(df_usuarios, use_container_width=True, hide_index=True)
+      else:
+        df_usuarios = pd.DataFrame()
+    except Exception as e:
+      st.error(f"Error al cargar usuarios: {e}")
+      df_usuarios = pd.DataFrame()
+
+    st.divider()
+
+    # 2. Formularios de creación y eliminación
+    col1, col2 = st.columns(2)
+    
+    with col1:
+      st.markdown("#### ➕ Crear Nuevo Usuario")
+      with st.form("nuevo_usuario_form"):
+        nuevo_user = st.text_input("Nombre de Usuario (ej. juan.perez)").strip()
+        nuevo_pass = st.text_input("Contraseña", type="password").strip()
+        nuevo_rol = st.selectbox("Rol", ["asesor", "admin"])
+        submit_crear = st.form_submit_button("Guardar Usuario", use_container_width=True)
+
+        if submit_crear:
+          if not nuevo_user or not nuevo_pass:
+            st.warning("⚠️ Debes llenar usuario y contraseña.")
+          elif not df_usuarios.empty and nuevo_user in df_usuarios["username"].values:
+            st.error("⚠️ Este nombre de usuario ya existe. Elige otro.")
+          else:
+            try:
+              supabase.table("usuarios").insert({
+                  "username": nuevo_user,
+                  "password": nuevo_pass,
+                  "rol": nuevo_rol
+              }).execute()
+              st.success(f"✅ Usuario '{nuevo_user}' creado exitosamente.")
+              st.rerun()
+            except Exception as e:
+              st.error(f"Error al crear: {e}")
+
+    with col2:
+      st.markdown("#### 🗑️ Eliminar Usuario")
+      if not df_usuarios.empty:
+        with st.form("eliminar_usuario_form"):
+          lista_usuarios = df_usuarios["username"].tolist()
+          user_a_borrar = st.selectbox("Selecciona el usuario a eliminar:", lista_usuarios)
+          submit_borrar = st.form_submit_button("Eliminar Permanentemente", use_container_width=True)
+
+          if submit_borrar:
+            if user_a_borrar == st.session_state["usuario"]:
+              st.error("⚠️ No puedes eliminar tu propia cuenta mientras estás logueado.")
+            else:
+              try:
+                supabase.table("usuarios").delete().eq("username", user_a_borrar).execute()
+                st.success(f"✅ Usuario '{user_a_borrar}' eliminado.")
+                st.rerun()
+              except Exception as e:
+                st.error(f"Error al eliminar: {e}")
