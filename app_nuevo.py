@@ -383,10 +383,14 @@ with tab2:
     busqueda_texto = st.text_input("Escribe el nombre, referencia, palabra clave o código:").strip().lower()
     if busqueda_texto and datos_cargados:
       registrar_busqueda(st.session_state["usuario"], busqueda_texto)
+# Filtro ampliado para buscar en todos los niveles del ERP
       mask = (
           df_inv["Descripcion"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
           | df_inv["Referencia"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv["Nivel2"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel1", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel2", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel3", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
+          | df_inv.get("Nivel4", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
           | df_inv["CodigoLimpio"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
           | df_inv["Talla"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
       )
