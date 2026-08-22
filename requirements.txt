@@ -3,3 +3,7 @@ pandas
 openpyxl
 supabase
 streamlit-option-menu
+python-dotenv
+google-generativeai
+altair
+Pillow
