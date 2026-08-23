@@ -48,18 +48,22 @@ def render_logo(ruta_imagen, width=160):
         
         css = f"""
         <style>
-        .logo-light-container img {{ display: block; width: {width}px; margin-bottom: 15px; }}
-        .logo-dark-container img {{ display: none; width: {width}px; margin-bottom: 15px; }}
+        .logo-light-container img {{ display: block; width: {width}px; }}
+        .logo-dark-container img {{ display: none; width: {width}px; }}
         .logo-wrapper {{
-            background: rgba(255, 255, 255, 0.05);
+            background: rgba(255, 255, 255, 0.9);
             padding: 12px;
-            border-radius: 10px;
+            border-radius: 12px;
             display: inline-block;
-            border: 1px solid rgba(255, 230, 0, 0.2);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            margin-bottom: 15px;
         }}
         @media (prefers-color-scheme: dark) {{
             .logo-light-container img {{ display: none; }}
             .logo-dark-container img {{ display: block; }}
+            .logo-wrapper {{
+                background: rgba(255, 255, 255, 0.95);
+            }}
         }}
         </style>
         <div class="logo-wrapper">
@@ -95,9 +99,10 @@ st.markdown("""
         color: var(--text-color);
     }
 
-    /* Ocultar texto residual de iconos colapsables de Streamlit */
+    /* Ocultar texto residual de elementos colapsables de Streamlit */
     header [data-testid="stHeader"] span, 
-    header [data-testid="collapsedControl"] span {
+    header [data-testid="collapsedControl"] span,
+    section[data-testid="stSidebar"] button[kind="header"] span {
         display: none !important;
     }
 
@@ -128,13 +133,12 @@ st.markdown("""
         font-family: 'Orbitron', sans-serif !important;
     }
 
-    /* Ajuste de tamaño para el título de bienvenida en login y evitar que se corte */
     .login-title {
         font-family: 'Orbitron', sans-serif !important;
-        font-size: 1.8rem !important;
+        font-size: 2rem !important;
         font-weight: 700;
         color: #FFFFFF;
-        white-space: nowrap;
+        margin-bottom: 5px;
     }
 
     .stButton button[kind="primary"], div.stButton > button {
@@ -161,11 +165,11 @@ if "felicitacion_mostrada" not in st.session_state:
     st.session_state.felicitacion_mostrada = False
 
 if not st.session_state.autenticado:
-    col_a, col_b, col_c = st.columns([0.5, 3, 0.5])
+    col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_b:
         render_logo("logo_adidas.png", 160)
         
-        st.markdown('<p class="login-title">⚡ ¡Bienvenid@s a Sinápsis!</p>', unsafe_allow_html=True)
+        st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
         st.caption("v3.4 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
@@ -195,7 +199,7 @@ if not st.session_state.autenticado:
 # ==========================================
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
-    st.markdown("### ⚡ Sinápsis")
+    st.markdown("### ⚡ Sinapsis")
     st.caption("🚀 **Versión:** 3.4 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
@@ -230,7 +234,12 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
 # ==========================================
-st.title("⚡ Sinápsis")
+# Obtenemos el nombre completo o usuario para el saludo personalizado con @
+nombre_usuario_actual = st.session_state.usuario_info.get('nombre_completo', '')
+if not nombre_usuario_actual or nombre_usuario_actual == 'None':
+    nombre_usuario_actual = st.session_state.usuario_actual
+
+st.title(f"⚡ ¡Bienvenid@, {nombre_usuario_actual}!")
 
 if st.session_state.es_admin:
     tabs = st.tabs(["📊 Performance & KPIs", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
