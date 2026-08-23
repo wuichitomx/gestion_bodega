@@ -221,8 +221,8 @@ if tab_admin_erp is not None:
             if st.button("🚀 Actualizar Catálogo en Supabase"):
                 try:
                     with st.spinner("Procesando y subiendo a la nube... Esto puede tomar unos segundos."):
-                        # Leer el archivo CSV
-                        df_cat = pd.read_csv(archivo_catalogo, encoding='latin1')
+                        # Leer el archivo CSV saltando las primeras 5 líneas de basura del ERP
+                        df_cat = pd.read_csv(archivo_catalogo, encoding='latin1', skiprows=5)
                         
                         # Convertir los datos a una lista de diccionarios que Supabase entienda
                         registros = df_cat.to_dict(orient="records")
