@@ -90,6 +90,15 @@ st.markdown("""
         font-family: 'Inter', sans-serif !important;
     }
 
+    /* Excepción: los íconos internos de Streamlit (ojo de contraseña,
+       flechas de colapsar menú, etc.) NO son imágenes, son texto que se
+       dibuja como símbolo usando una fuente especial. Si les quitamos esa
+       fuente con la regla de arriba, se ven como palabras sueltas en vez
+       de íconos. Aquí se la devolvemos solo a ellos. */
+    [data-testid="stIconMaterial"] {
+        font-family: 'Material Symbols Rounded' !important;
+    }
+
     h1, h2, h3, .stHeader {
         font-family: 'Orbitron', sans-serif !important;
         letter-spacing: 1px;
@@ -455,6 +464,11 @@ with tab_perf:
             st.markdown("---")
             st.subheader("🎯 Comparativa de KPIs Operativos")
             
+            # Para los tres KPIs, "más alto que la tienda" siempre es bueno,
+            # así que usamos SIEMPRE delta_color="normal": Streamlit ya pinta
+            # verde lo positivo y rojo lo negativo por su cuenta. Además,
+            # ponemos el signo (+/-) antes del "$" para que Streamlit detecte
+            # bien si es positivo o negativo.
             kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
             with kpi_c1:
                 diff_upt = upt_asesor - upt_tienda
@@ -462,23 +476,25 @@ with tab_perf:
                     label="UPT (Unidades x Ticket)", 
                     value=f"{upt_asesor:.2f}", 
                     delta=f"{diff_upt:+.2f} vs Tienda ({upt_tienda:.2f})",
-                    delta_color="normal" if diff_upt >= 0 else "inverse"
+                    delta_color="normal"
                 )
             with kpi_c2:
                 diff_atv = atv_asesor - atv_tienda
+                signo_atv = "+" if diff_atv >= 0 else "-"
                 st.metric(
                     label="ATV (Ticket Promedio)", 
                     value=f"${atv_asesor:,.2f}", 
-                    delta=f"${diff_atv:+,.2f} vs Tienda (${atv_tienda:,.2f})",
-                    delta_color="normal" if diff_atv >= 0 else "inverse"
+                    delta=f"{signo_atv}${abs(diff_atv):,.2f} vs Tienda (${atv_tienda:,.2f})",
+                    delta_color="normal"
                 )
             with kpi_c3:
                 diff_asp = asp_asesor - asp_tienda
+                signo_asp = "+" if diff_asp >= 0 else "-"
                 st.metric(
                     label="ASP (Precio Promedio)", 
                     value=f"${asp_asesor:,.2f}", 
-                    delta=f"${diff_asp:+,.2f} vs Tienda (${asp_tienda:,.2f})",
-                    delta_color="normal" if diff_asp >= 0 else "inverse"
+                    delta=f"{signo_asp}${abs(diff_asp):,.2f} vs Tienda (${asp_tienda:,.2f})",
+                    delta_color="normal"
                 )
 
             st.markdown("---")
