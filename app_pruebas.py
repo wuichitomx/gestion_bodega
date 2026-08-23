@@ -537,7 +537,14 @@ with tab_busqueda:
     in_ref = col1.text_input("🔍 Ref/Desc:", key="in_ref")
     in_talla = col2.text_input("📏 Talla:", key="in_talla")
     in_ubic = col3.text_input("🏢 Depto:", key="in_ubic")
-    solo_disp = st.checkbox("Ocultar stock en 0", value=True)
+
+    # El checkbox de "Ocultar stock en 0" solo lo ve el admin; para el
+    # asesor simplemente siempre filtramos el stock en 0 (no le sirve
+    # ver productos sin existencia).
+    if st.session_state.es_admin:
+        solo_disp = st.checkbox("Ocultar stock en 0", value=True)
+    else:
+        solo_disp = True
         
     if st.button("Buscar en la Red") or in_ref or in_talla or in_ubic:
         query = supabase.table("catalogo_erp").select("*")
@@ -565,7 +572,13 @@ with tab_busqueda:
             df['ubicacion'] = df['ubicacion'].fillna("Sin ubicación registrada")
 
             st.success(f"⚡ Se conectaron {len(df)} artículos en la red.")
-            st.dataframe(df[['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'stock_sistema', 'ubicacion']], use_container_width=True)
+
+            # El admin ve la tabla completa (incluye stock y códigos internos);
+            # el asesor solo ve lo que necesita en piso de venta.
+            if st.session_state.es_admin:
+                st.dataframe(df[['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'stock_sistema', 'ubicacion']], use_container_width=True)
+            else:
+                st.dataframe(df[['referencia', 'descripcion', 'talla', 'ubicacion']], use_container_width=True)
             
             ref_raw = df.iloc[0]['referencia']
             codigo_detectado = str(ref_raw).split('-')[0].strip()
@@ -575,8 +588,12 @@ with tab_busqueda:
             st.markdown("---")
             st.markdown("#### ⚡ Asistente Sináptico de Ventas")
             with st.expander(f"✨ Ver Tips de Venta para {codigo_detectado}", expanded=False):
-                if st.button("Regenerar argumentos con IA", key="btn_ia_manual_regen"):
-                    supabase.table("tips_ia").delete().eq("referencia", codigo_detectado).execute()
+                # Borrar y regenerar el tip guardado es una acción delicada
+                # (afecta lo que ven todos los usuarios), así que la dejamos
+                # solo para el admin.
+                if st.session_state.es_admin:
+                    if st.button("Regenerar argumentos con IA", key="btn_ia_manual_regen"):
+                        supabase.table("tips_ia").delete().eq("referencia", codigo_detectado).execute()
                     
                 if st.button("Generar argumentos con IA", key="btn_ia_manual"):
                     with st.spinner("Estableciendo sinapsis cognitiva..."):
