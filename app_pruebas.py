@@ -117,15 +117,15 @@ st.markdown("""
 
     .stAlert, div[data-testid="stExpander"] {
         border-radius: 12px;
-        border: 1px solid rgba(255, 230, 0, 0.3);
+        border: 1px solid rgba(57, 255, 136, 0.3);
     }
 
     .kpi-card {
-        background: linear-gradient(135deg, rgba(0, 240, 255, 0.03) 0%, rgba(255, 230, 0, 0.05) 100%);
+        background: linear-gradient(135deg, rgba(0, 217, 245, 0.03) 0%, rgba(57, 255, 136, 0.05) 100%);
         padding: 18px;
         border-radius: 12px;
-        border-left: 5px solid #FFE600;
-        border-top: 1px solid rgba(255, 230, 0, 0.15);
+        border-left: 5px solid #39FF88;
+        border-top: 1px solid rgba(57, 255, 136, 0.15);
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
         margin-bottom: 10px;
         transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -133,11 +133,11 @@ st.markdown("""
     
     .kpi-card:hover {
         transform: translateY(-2px);
-        box-shadow: 0 6px 25px rgba(255, 230, 0, 0.2);
+        box-shadow: 0 6px 25px rgba(57, 255, 136, 0.2);
     }
 
     .kpi-card h4 {
-        color: #FFE600;
+        color: #39FF88;
         font-weight: 600;
         font-family: 'Orbitron', sans-serif !important;
     }
@@ -157,8 +157,8 @@ st.markdown("""
     }
 
     div.stButton > button:hover {
-        border-color: #FFE600;
-        box-shadow: 0 0 12px rgba(255, 230, 0, 0.4);
+        border-color: #39FF88;
+        box-shadow: 0 0 12px rgba(57, 255, 136, 0.4);
     }
     </style>
 """, unsafe_allow_html=True)
@@ -251,10 +251,10 @@ if not nombre_usuario_actual or nombre_usuario_actual == 'None':
 st.title(f"⚡ ¡Bienvenid@, {nombre_usuario_actual}!")
 
 if st.session_state.es_admin:
-    tabs = st.tabs(["📊 Performance & KPIs", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
+    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
     tab_perf, tab_busqueda, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
 else:
-    tabs = st.tabs(["📊 Performance & KPIs", "🔍 Búsqueda Manual", "📦 Scanner Rápido"])
+    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📦 Scanner Rápido"])
     tab_perf, tab_busqueda, tab_escaneo = tabs[0], tabs[1], tabs[2]
     tab_admin_erp, tab_admin_user = None, None
 
@@ -284,7 +284,7 @@ if tab_admin_erp is not None:
                 st.session_state.felicitacion_mostrada = False
                 
                 st.success("✅ Reporte de ventas procesado por la red correctamente.")
-                st.info("👉 Ahora puedes ir a la pestaña '📊 Performance & KPIs' para ver los resultados actualizados.")
+                st.info("👉 Ahora puedes ir a la pestaña '📊 Dashboard' para ver los resultados actualizados.")
             except Exception as ex:
                 st.error(f"Error al procesar el CSV: {ex}")
         
@@ -331,9 +331,26 @@ if tab_admin_erp is not None:
                         
                         df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
                         registros = df_cat.to_dict(orient="records")
-                        
-                        supabase.table("catalogo_erp").upsert(registros).execute()
-                        st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {len(registros)} artículos.")
+
+                        # Subimos el catálogo en bloques (no todo de un jalón)
+                        # para poder mostrar una barra de progreso REAL: cada
+                        # que se sube un bloque, avanza el porcentaje.
+                        TAMANO_BLOQUE = 500
+                        total_registros = len(registros)
+                        total_bloques = max(1, -(-total_registros // TAMANO_BLOQUE))  # redondeo hacia arriba
+
+                        barra_progreso = st.progress(0, text=f"Sincronizando 0 de {total_registros} artículos...")
+
+                        for i in range(0, total_registros, TAMANO_BLOQUE):
+                            bloque = registros[i:i + TAMANO_BLOQUE]
+                            supabase.table("catalogo_erp").upsert(bloque).execute()
+
+                            subidos = min(i + TAMANO_BLOQUE, total_registros)
+                            porcentaje = subidos / total_registros
+                            barra_progreso.progress(porcentaje, text=f"Sincronizando {subidos} de {total_registros} artículos...")
+
+                        barra_progreso.empty()
+                        st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {total_registros} artículos.")
                 except Exception as ex:
                     st.error(f"⚠️ Error al sincronizar: {ex}")
         # ==========================================
@@ -484,7 +501,7 @@ with tab_perf:
                 st.metric(
                     label="ATV (Ticket Promedio)", 
                     value=f"${atv_asesor:,.2f}", 
-                    delta=f"{signo_atv}${abs(diff_atv):,.2f} vs Tienda (${atv_tienda:,.2f})",
+                    delta=f"{signo_atv}\\${abs(diff_atv):,.2f} vs Tienda (\\${atv_tienda:,.2f})",
                     delta_color="normal"
                 )
             with kpi_c3:
@@ -493,7 +510,7 @@ with tab_perf:
                 st.metric(
                     label="ASP (Precio Promedio)", 
                     value=f"${asp_asesor:,.2f}", 
-                    delta=f"{signo_asp}${abs(diff_asp):,.2f} vs Tienda (${asp_tienda:,.2f})",
+                    delta=f"{signo_asp}\\${abs(diff_asp):,.2f} vs Tienda (\\${asp_tienda:,.2f})",
                     delta_color="normal"
                 )
 
@@ -501,7 +518,7 @@ with tab_perf:
             st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
             
             df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#FFE600' if str(x) == str(nombre_asesor) else '#00F0FF')
+            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#39FF88' if str(x) == str(nombre_asesor) else '#00D9F5')
             
             bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
                 x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
