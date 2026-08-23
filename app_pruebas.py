@@ -90,11 +90,6 @@ st.markdown("""
         font-family: 'Inter', sans-serif !important;
     }
 
-    /* Excepción: los íconos internos de Streamlit (ojo de contraseña,
-       flechas de colapsar menú, etc.) NO son imágenes, son texto que se
-       dibuja como símbolo usando una fuente especial. Si les quitamos esa
-       fuente con la regla de arriba, se ven como palabras sueltas en vez
-       de íconos. Aquí se la devolvemos solo a ellos. */
     [data-testid="stIconMaterial"] {
         font-family: 'Material Symbols Rounded' !important;
     }
@@ -243,7 +238,6 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
 # ==========================================
-# Obtenemos el nombre completo o usuario para el saludo personalizado con @
 nombre_usuario_actual = st.session_state.usuario_info.get('nombre_completo', '')
 if not nombre_usuario_actual or nombre_usuario_actual == 'None':
     nombre_usuario_actual = st.session_state.usuario_actual
@@ -254,9 +248,6 @@ if st.session_state.es_admin:
     tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
     tab_perf, tab_busqueda, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
 else:
-    # El Scanner Rápido queda en pausa para asesores: la cámara no
-    # funciona bien en iPhone y los lectores de bolsillo no son viables
-    # de momento por presupuesto. Solo se les deja Búsqueda Manual.
     tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual"])
     tab_perf, tab_busqueda = tabs[0], tabs[1]
     tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None
@@ -335,12 +326,9 @@ if tab_admin_erp is not None:
                         df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
                         registros = df_cat.to_dict(orient="records")
 
-                        # Subimos el catálogo en bloques (no todo de un jalón)
-                        # para poder mostrar una barra de progreso REAL: cada
-                        # que se sube un bloque, avanza el porcentaje.
                         TAMANO_BLOQUE = 500
                         total_registros = len(registros)
-                        total_bloques = max(1, -(-total_registros // TAMANO_BLOQUE))  # redondeo hacia arriba
+                        total_bloques = max(1, -(-total_registros // TAMANO_BLOQUE))
 
                         barra_progreso = st.progress(0, text=f"Sincronizando 0 de {total_registros} artículos...")
 
@@ -356,8 +344,7 @@ if tab_admin_erp is not None:
                         st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {total_registros} artículos.")
                 except Exception as ex:
                     st.error(f"⚠️ Error al sincronizar: {ex}")
-        # ==========================================
-                
+        
         st.markdown("---")
         st.subheader("⚙️ Configuración de Metas por Asesor")
         
@@ -484,11 +471,6 @@ with tab_perf:
             st.markdown("---")
             st.subheader("🎯 Comparativa de KPIs Operativos")
             
-            # Para los tres KPIs, "más alto que la tienda" siempre es bueno,
-            # así que usamos SIEMPRE delta_color="normal": Streamlit ya pinta
-            # verde lo positivo y rojo lo negativo por su cuenta. Además,
-            # ponemos el signo (+/-) antes del "$" para que Streamlit detecte
-            # bien si es positivo o negativo.
             kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
             with kpi_c1:
                 diff_upt = upt_asesor - upt_tienda
@@ -541,20 +523,12 @@ with tab_busqueda:
     in_talla = col2.text_input("📏 Talla:", key="in_talla")
     in_ubic = col3.text_input("🏢 Estante/Ubicación:", key="in_ubic")
 
-    # El checkbox de "Ocultar stock en 0" solo lo ve el admin; para el
-    # asesor simplemente siempre filtramos el stock en 0 (no le sirve
-    # ver productos sin existencia).
     if st.session_state.es_admin:
         solo_disp = st.checkbox("Ocultar stock en 0", value=True)
     else:
         solo_disp = True
         
     if st.button("Buscar en la Red") or in_ref or in_talla or in_ubic:
-        # Si se busca por estante, primero preguntamos en la tabla
-        # 'ubicaciones' qué códigos viven ahí (ej. "A3"), y luego filtramos
-        # el catálogo solo a esos códigos. Antes esto buscaba por error
-        # dentro de nivel1/nivel2 (categoría), que es una tabla distinta y
-        # nunca iba a encontrar coincidencia con un nombre de estante.
         codigos_en_ubicacion = None
         if in_ubic:
             res_ubic_busqueda = supabase.table("ubicaciones").select("codigo_limpio").ilike("ubicacion", f"%{in_ubic.strip()}%").execute()
@@ -564,11 +538,11 @@ with tab_busqueda:
 
         query = supabase.table("catalogo_erp").select("*")
         if solo_disp: query = query.gt("stock_sistema", 0)
-        if in_ref: query = query.or_(f"referencia.ilike.%{in_ref.strip()}%,descripcion.ilike.%{in_ref.strip()}%,nivel1.ilike.%{in_ref.strip()}%,nivel2.ilike.%{in_ref.strip()}%,nivel3.ilike.%{in_ref.strip()}%")
+        if in_ref: query = query.or_(f"referencia.ilike.%{in_ref.strip()}%,descripcion.ilike.%{in_ref.strip()}%,nivel1.ilike.%{in_ref.strip()}%,nivel2.ilike.%{in_ubic.strip()}%,nivel3.ilike.%{in_ref.strip()}%")
         if in_talla: query = query.like("talla", f"{in_talla.strip()}%")
         if codigos_en_ubicacion is not None:
             if not codigos_en_ubicacion:
-                codigos_en_ubicacion = ["__sin_resultados__"]  # fuerza que la búsqueda no traiga nada
+                codigos_en_ubicacion = ["__sin_resultados__"]
             query = query.in_("codigo_limpio", codigos_en_ubicacion)
         
         res = query.limit(50).execute() 
@@ -591,8 +565,6 @@ with tab_busqueda:
 
             st.success(f"⚡ Se conectaron {len(df)} artículos en la red.")
 
-            # El admin ve la tabla completa (incluye stock y códigos internos);
-            # el asesor solo ve lo que necesita en piso de venta.
             if st.session_state.es_admin:
                 st.dataframe(df[['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'stock_sistema', 'ubicacion']], use_container_width=True)
             else:
@@ -606,9 +578,6 @@ with tab_busqueda:
             st.markdown("---")
             st.markdown("#### ⚡ Asistente Sináptico de Ventas")
             with st.expander(f"✨ Ver Tips de Venta para {codigo_detectado}", expanded=False):
-                # Borrar y regenerar el tip guardado es una acción delicada
-                # (afecta lo que ven todos los usuarios), así que la dejamos
-                # solo para el admin.
                 if st.session_state.es_admin:
                     if st.button("Regenerar argumentos con IA", key="btn_ia_manual_regen"):
                         supabase.table("tips_ia").delete().eq("referencia", codigo_detectado).execute()
@@ -622,7 +591,7 @@ with tab_busqueda:
             st.warning("Sin conexiones en la red.")
 
 # ------------------------------------------
-# 3. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN, en pausa para asesores)
+# 3. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
 # ------------------------------------------
 if tab_escaneo is not None:
     with tab_escaneo:
@@ -640,18 +609,60 @@ if tab_escaneo is not None:
 # ------------------------------------------
 if tab_admin_user is not None:
     with tab_admin_user:
+        st.subheader("👥 Agregar Nuevo Nodo de Usuario")
         with st.form("nuevo_u"):
-            u_n, p_n = st.text_input("Usuario"), st.text_input("Contraseña", type="password")
-            if st.form_submit_button("Agregar Nodo de Usuario"):
-                supabase.table("usuarios").insert({
-                    "username": u_n.strip(), 
-                    "password": p_n.strip(), 
-                    "rol": "asesor",
-                    "codigo_erp": u_n.strip(),
-                    "nombre_completo": "",
-                    "meta_mensual": 0.0
-                }).execute()
-                st.rerun()
-        res_u_list = supabase.table("usuarios").select("username, rol, codigo_erp, nombre_completo, meta_mensual").execute().data
+            col_u1, col_u2 = st.columns(2)
+            with col_u1:
+                u_n = st.text_input("Usuario")
+            with col_u2:
+                # Se deja en texto plano a propósito para que verifiques lo que escribes al crearlo.
+                p_n = st.text_input("Contraseña")
+            if st.form_submit_button("Agregar Usuario"):
+                if u_n and p_n:
+                    try:
+                        supabase.table("usuarios").insert({
+                            "username": u_n.strip(), 
+                            "password": p_n.strip(), 
+                            "rol": "asesor",
+                            "codigo_erp": u_n.strip(),
+                            "nombre_completo": "",
+                            "meta_mensual": 0.0
+                        }).execute()
+                        st.success(f"Nodo creado para el usuario {u_n.strip()}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al crear usuario: {e}")
+                else:
+                    st.warning("Debes llenar el usuario y la contraseña.")
+                    
+        st.markdown("---")
+        st.subheader("🔑 Gestionar Contraseñas y Permisos")
+        st.info("Visualiza y edita las contraseñas o el rol de acceso directamente en esta tabla. No olvides dar clic en 'Guardar Cambios'.")
+        
+        # Traemos username, password y rol directamente desde Supabase
+        res_u_list = supabase.table("usuarios").select("username, password, rol").execute().data
         if res_u_list:
-            st.dataframe(pd.DataFrame(res_u_list), use_container_width=True)
+            df_u_pass = pd.DataFrame(res_u_list)
+            
+            edited_pass_df = st.data_editor(
+                df_u_pass,
+                column_config={
+                    "username": st.column_config.TextColumn("Usuario App", disabled=True),
+                    "password": st.column_config.TextColumn("Contraseña (Editable)"),
+                    "rol": st.column_config.SelectboxColumn("Rol de Acceso", options=["admin", "asesor"])
+                },
+                use_container_width=True
+            )
+            
+            if st.button("Guardar Cambios de Usuarios"):
+                with st.spinner("Actualizando contraseñas y permisos en el núcleo..."):
+                    try:
+                        for _, row in edited_pass_df.iterrows():
+                            supabase.table("usuarios").update({
+                                "password": str(row['password']).strip(),
+                                "rol": str(row['rol']).strip()
+                            }).eq("username", row['username']).execute()
+                        st.success("¡Contraseñas y accesos actualizados correctamente!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ocurrió un error al guardar: {e}")
