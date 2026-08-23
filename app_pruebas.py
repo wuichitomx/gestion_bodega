@@ -11,7 +11,7 @@ from PIL import Image, ImageOps
 # Importamos las reglas maestras desde nuestro nuevo archivo
 from configuracion_ia import generar_prompt_maestro
 
-st.set_page_config(page_title="Sistema de Bodega & Performance", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Sinapsis | Sistema de Bodega & Performance", page_icon="⚡", layout="wide")
 
 # ==========================================
 # CONFIGURACIÓN SUPABASE E IA
@@ -67,18 +67,59 @@ def render_logo(ruta_imagen, width=160):
         pass
 
 # ==========================================
-# ESTILO GENERAL
+# ESTILO VISUAL "SINAPSIS" (NEURO-TECH & CHISPA)
 # ==========================================
 st.markdown("""
     <style>
-    [data-testid="stAppViewContainer"] { color: var(--text-color); }
-    .stAlert, div[data-testid="stExpander"] { border-radius: 8px; }
+    /* Importamos fuente moderna y limpia de alta legibilidad */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    html, body, [class*="st"] {
+        font-family: 'Inter', sans-serif !important;
+    }
+
+    [data-testid="stAppViewContainer"] {
+        color: var(--text-color);
+    }
+
+    .stAlert, div[data-testid="stExpander"] {
+        border-radius: 12px;
+        border: 1px solid rgba(0, 240, 255, 0.2);
+    }
+
+    /* Tarjetas tipo Nodo Sináptico (KPIs) */
     .kpi-card {
-        background-color: rgba(125, 125, 125, 0.1);
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 5px solid #0080FF;
+        background: linear-gradient(135deg, rgba(0, 240, 255, 0.05) 0%, rgba(155, 81, 224, 0.05) 100%);
+        padding: 18px;
+        border-radius: 12px;
+        border-left: 5px solid #00F0FF;
+        border-top: 1px solid rgba(0, 240, 255, 0.1);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
         margin-bottom: 10px;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    
+    .kpi-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 25px rgba(0, 240, 255, 0.15);
+    }
+
+    .kpi-card h4 {
+        color: #9B51E0;
+        font-weight: 600;
+    }
+
+    /* Botones principales con acento de Chispa Sináptica (Amarillo Neón) */
+    .stButton button[kind="primary"], div.stButton > button {
+        border-radius: 8px;
+        font-weight: 500;
+        transition: all 0.3s ease;
+    }
+
+    /* Resaltado especial para botones de acción clave */
+    div.stButton > button:hover {
+        border-color: #00F0FF;
+        box-shadow: 0 0 12px rgba(0, 240, 255, 0.4);
     }
     </style>
 """, unsafe_allow_html=True)
@@ -98,8 +139,8 @@ if not st.session_state.autenticado:
     with col_b:
         render_logo("logo_adidas.png", 160)
         
-        st.title("🔐 Acceso al Sistema")
-        st.caption("v3.3 | Desarrollado por Risal Tech")
+        st.title("⚡ Sinapsis")
+        st.caption("v3.4 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -128,8 +169,8 @@ if not st.session_state.autenticado:
 # ==========================================
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
-    st.markdown("### Risal Tech")
-    st.caption("🚀 **Versión:** 3.3 (Performance Hub)")
+    st.markdown("### ⚡ Sinapsis")
+    st.caption("🚀 **Versión:** 3.4 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -148,7 +189,7 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
         res_db = supabase.table("tips_ia").select("tips").eq("referencia", ref_limpia).execute().data
         
         if res_db and len(res_db) > 0 and res_db[0].get("tips"):
-            return res_db[0].get("tips"), "⚡ (Obtenido de la base de datos)"
+            return res_db[0].get("tips"), "⚡ (Obtenido del núcleo de datos)"
         
         model = genai.GenerativeModel('gemini-3.7-flash')
         prompt_maestro = generar_prompt_maestro(nombre_producto, ref_limpia, categoria)
@@ -156,14 +197,14 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
         nuevo_texto = response.text
         
         supabase.table("tips_ia").upsert({"referencia": ref_limpia, "tips": nuevo_texto}).execute()
-        return nuevo_texto, "🤖 (Generado por IA con Reglas Locales)"
+        return nuevo_texto, "⚡ (Generado por IA con Red Sináptica)"
     except Exception as e:
         return f"⚠️ Error al procesar: {e}", "Error"
 
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
 # ==========================================
-st.title("Sistema de Bodega & Performance")
+st.title("⚡ Sinapsis: Red de Bodega & Performance")
 
 if st.session_state.es_admin:
     tabs = st.tabs(["📊 Performance & KPIs", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
@@ -198,28 +239,26 @@ if tab_admin_erp is not None:
                 df_raw.to_csv("ventas_diarias_temp.csv", index=False)
                 st.session_state.felicitacion_mostrada = False
                 
-                st.success("✅ Reporte de ventas cargado y guardado correctamente.")
+                st.success("✅ Reporte de ventas procesado por la red correctamente.")
                 st.info("👉 Ahora puedes ir a la pestaña '📊 Performance & KPIs' para ver los resultados actualizados.")
             except Exception as ex:
                 st.error(f"Error al procesar el CSV: {ex}")
         
         # ==========================================
-        # NUEVA SECCIÓN: CARGA DE CATÁLOGO A SUPABASE CON TRADUCTOR
+        # SECCIÓN: CARGA DE CATÁLOGO A SUPABASE CON TRADUCTOR
         # ==========================================
         st.markdown("---")
-        st.subheader("📦 Cargar Catálogo de Inventario a la Nube")
-        st.info("Sube aquí el archivo CSV de tu ERP (RPInv_Extracto_Referencia) para actualizar los productos y existencias en Supabase.")
+        st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
+        st.info("Sube aquí el archivo CSV de tu ERP (RPInv_Extracto_Referencia) para sincronizar la red en Supabase.")
 
         archivo_catalogo = st.file_uploader("Subir CSV de Catálogo", type=["csv"], key="cat_csv")
 
         if archivo_catalogo is not None:
-            if st.button("🚀 Actualizar Catálogo en Supabase"):
+            if st.button("⚡ Sincronizar Catálogo en la Nube"):
                 try:
-                    with st.spinner("Procesando y subiendo a la nube... Esto puede tomar un par de minutos dependiendo del tamaño del archivo."):
-                        # 1. Leer el archivo como texto puro saltando las 5 líneas de encabezado
+                    with st.spinner("Estableciendo sinapsis y sincronizando el núcleo... Esto puede tomar unos segundos."):
                         df_cat = pd.read_csv(archivo_catalogo, encoding='latin1', skiprows=5, dtype=str)
                         
-                        # 2. Diccionario Traductor: 'Nombre en ERP' : 'Nombre en Supabase'
                         mapeo_columnas = {
                             'CodigoAlterno': 'codigo_limpio',
                             'Referencia': 'referencia',
@@ -231,38 +270,28 @@ if tab_admin_erp is not None:
                             'Nivel4': 'nivel4'
                         }
                         
-                        # Aplicar la traducción de nombres
                         df_cat = df_cat.rename(columns=mapeo_columnas)
                         
-                        # 3. Extraer la talla automáticamente desde la referencia (ej: 280647-10 saca el '10')
                         if 'referencia' in df_cat.columns:
                             df_cat['talla'] = df_cat['referencia'].apply(lambda x: str(x).split('-', 1)[1] if '-' in str(x) else '')
                         
-                        # 4. Quedarnos ÚNICAMENTE con las columnas que Supabase espera, ignorando las extras
                         columnas_esperadas = ['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'nivel2', 'nivel3', 'nivel4', 'stock_sistema']
                         columnas_existentes = [col for col in columnas_esperadas if col in df_cat.columns]
                         df_cat = df_cat[columnas_existentes]
                         
-                        # 5. Asegurar que el stock sea formato número entero (soluciona el error 0.0)
                         if 'stock_sistema' in df_cat.columns:
                             df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0).astype(int)
                         
-                        # 6. Eliminar filas que vengan sin código de barras (generalmente subtotales al final del ERP)
                         if 'codigo_limpio' in df_cat.columns:
                             df_cat = df_cat.dropna(subset=['codigo_limpio'])
                         
-                        # 7. Convertir vacíos a nulos de base de datos
                         df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
-                        
-                        # 8. Convertir y mandar en paquetes a Supabase
                         registros = df_cat.to_dict(orient="records")
                         
-                        # Inyectar los datos en Supabase (Actualiza o Crea nuevo)
                         supabase.table("catalogo_erp").upsert(registros).execute()
-                        
-                        st.success(f"✅ ¡Catálogo actualizado exitosamente! Se subieron {len(registros)} artículos a la base de datos.")
+                        st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {len(registros)} artículos.")
                 except Exception as ex:
-                    st.error(f"⚠️ Error al subir el catálogo: {ex}")
+                    st.error(f"⚠️ Error al sincronizar: {ex}")
         # ==========================================
                 
         st.markdown("---")
@@ -293,7 +322,7 @@ if tab_admin_erp is not None:
                         "nombre_completo": str(row['nombre_completo']).strip(),
                         "meta_mensual": float(row['meta_mensual']) if row['meta_mensual'] else 0.0
                     }).eq("username", row['username']).execute()
-                st.success("¡Metas y códigos guardados correctamente en Supabase!")
+                st.success("¡Metas guardadas correctamente en la red!")
                 st.rerun()
 
 # ------------------------------------------
@@ -353,13 +382,13 @@ with tab_perf:
                 
                 if "admin" not in st.session_state.usuario_actual.lower():
                     if str(nombre_asesor) == str(primer_lugar_nombre):
-                        st.success(f"🏆 ¡Felicidades, {nombre_asesor}! Eres el primer lugar en ventas, continúa así.")
+                        st.success(f"🏆 ¡Felicidades, {nombre_asesor}! Lideras la red de ventas, continúa así.")
                         if not st.session_state.felicitacion_mostrada:
                             st.balloons()
                             st.session_state.felicitacion_mostrada = True
                     else:
                         diferencia = primer_lugar_venta - venta_asesor_neto
-                        st.info(f"🚀 ¡Excelente esfuerzo, {nombre_asesor}! Estás a **${diferencia:,.2f}** de llegar al primer lugar con {primer_lugar_nombre}.")
+                        st.info(f"⚡ ¡Excelente esfuerzo, {nombre_asesor}! Estás a **${diferencia:,.2f}** de conectar con el primer lugar ({primer_lugar_nombre}).")
             
             st.header("📊 Tablero de Rendimiento Diario")
 
@@ -403,9 +432,9 @@ with tab_perf:
             st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
             
             df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#0080FF' if str(x) == str(nombre_asesor) else '#7F8C8D')
+            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#00F0FF' if str(x) == str(nombre_asesor) else '#9B51E0')
             
-            bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+            bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
                 x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
                 y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
                 color=alt.Color('Color:N', scale=None)
@@ -424,7 +453,7 @@ with tab_busqueda:
     in_ubic = col3.text_input("🏢 Depto:", key="in_ubic")
     solo_disp = st.checkbox("Ocultar stock en 0", value=True)
         
-    if st.button("Buscar Producto") or in_ref or in_talla or in_ubic:
+    if st.button("Buscar en la Red") or in_ref or in_talla or in_ubic:
         query = supabase.table("catalogo_erp").select("*")
         if solo_disp: query = query.gt("stock_sistema", 0)
         if in_ref: query = query.or_(f"referencia.ilike.%{in_ref.strip()}%,descripcion.ilike.%{in_ref.strip()}%")
@@ -449,7 +478,7 @@ with tab_busqueda:
                 df['ubicacion'] = None
             df['ubicacion'] = df['ubicacion'].fillna("Sin ubicación registrada")
 
-            st.success(f"✅ Se encontraron {len(df)} artículos.")
+            st.success(f"⚡ Se conectaron {len(df)} artículos en la red.")
             st.dataframe(df[['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'stock_sistema', 'ubicacion']], use_container_width=True)
             
             ref_raw = df.iloc[0]['referencia']
@@ -458,18 +487,18 @@ with tab_busqueda:
             categoria_detectada = df.iloc[0].get('nivel1', 'General')
             
             st.markdown("---")
-            st.markdown("#### 🤖 Asistente de Ventas en Piso")
+            st.markdown("#### ⚡ Asistente Sináptico de Ventas")
             with st.expander(f"✨ Ver Tips de Venta para {codigo_detectado}", expanded=False):
                 if st.button("Regenerar argumentos con IA", key="btn_ia_manual_regen"):
                     supabase.table("tips_ia").delete().eq("referencia", codigo_detectado).execute()
                     
                 if st.button("Generar argumentos con IA", key="btn_ia_manual"):
-                    with st.spinner("Buscando en la base de conocimientos..."):
+                    with st.spinner("Estableciendo sinapsis cognitiva..."):
                         tips_venta, origen_dato = obtener_o_generar_storytelling(codigo_detectado, nombre_detectado, categoria_detectada)
                         st.info(tips_venta)
-                        st.caption(f"💡 {origen_dato}")
+                        st.caption(f"⚡ {origen_dato}")
         else:
-            st.warning("Sin resultados.")
+            st.warning("Sin conexiones en la red.")
 
 # ------------------------------------------
 # 3. PESTAÑA: SCANNER RÁPIDO
@@ -482,7 +511,7 @@ with tab_escaneo:
             p = prod[0]
             st.success(f"Producto: {p.get('descripcion')} | Ref: {p.get('referencia')} | Stock: {p.get('stock_sistema')}")
         else:
-            st.warning("No encontrado en el catálogo.")
+            st.warning("Producto no encontrado en el núcleo.")
 
 # ------------------------------------------
 # 5. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
@@ -491,7 +520,7 @@ if tab_admin_user is not None:
     with tab_admin_user:
         with st.form("nuevo_u"):
             u_n, p_n = st.text_input("Usuario"), st.text_input("Contraseña", type="password")
-            if st.form_submit_button("Agregar Usuario"):
+            if st.form_submit_button("Agregar Nodo de Usuario"):
                 supabase.table("usuarios").insert({
                     "username": u_n.strip(), 
                     "password": p_n.strip(), 
