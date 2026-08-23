@@ -254,9 +254,12 @@ if st.session_state.es_admin:
     tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
     tab_perf, tab_busqueda, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
 else:
-    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📦 Scanner Rápido"])
-    tab_perf, tab_busqueda, tab_escaneo = tabs[0], tabs[1], tabs[2]
-    tab_admin_erp, tab_admin_user = None, None
+    # El Scanner Rápido queda en pausa para asesores: la cámara no
+    # funciona bien en iPhone y los lectores de bolsillo no son viables
+    # de momento por presupuesto. Solo se les deja Búsqueda Manual.
+    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual"])
+    tab_perf, tab_busqueda = tabs[0], tabs[1]
+    tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None
 
 # ------------------------------------------
 # 4. PESTAÑA: ADMIN & CARGA ERP (SÓLO ADMIN)
@@ -604,17 +607,18 @@ with tab_busqueda:
             st.warning("Sin conexiones en la red.")
 
 # ------------------------------------------
-# 3. PESTAÑA: SCANNER RÁPIDO
+# 3. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN, en pausa para asesores)
 # ------------------------------------------
-with tab_escaneo:
-    codigo = st.text_input("Escanea o escribe el código de barras:", key="scan")
-    if codigo:
-        prod = supabase.table("catalogo_erp").select("*").eq("codigo_limpio", codigo.strip()).execute().data
-        if prod:
-            p = prod[0]
-            st.success(f"Producto: {p.get('descripcion')} | Ref: {p.get('referencia')} | Stock: {p.get('stock_sistema')}")
-        else:
-            st.warning("Producto no encontrado en el núcleo.")
+if tab_escaneo is not None:
+    with tab_escaneo:
+        codigo = st.text_input("Escanea o escribe el código de barras:", key="scan")
+        if codigo:
+            prod = supabase.table("catalogo_erp").select("*").eq("codigo_limpio", codigo.strip()).execute().data
+            if prod:
+                p = prod[0]
+                st.success(f"Producto: {p.get('descripcion')} | Ref: {p.get('referencia')} | Stock: {p.get('stock_sistema')}")
+            else:
+                st.warning("Producto no encontrado en el núcleo.")
 
 # ------------------------------------------
 # 5. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
