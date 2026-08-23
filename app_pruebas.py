@@ -243,9 +243,9 @@ if tab_admin_erp is not None:
                         columnas_existentes = [col for col in columnas_esperadas if col in df_cat.columns]
                         df_cat = df_cat[columnas_existentes]
                         
-                        # 5. Asegurar que el stock sea formato número
+                        # 5. Asegurar que el stock sea formato número entero (soluciona el error 0.0)
                         if 'stock_sistema' in df_cat.columns:
-                            df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0)
+                            df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0).astype(int)
                         
                         # 6. Eliminar filas que vengan sin código de barras (generalmente subtotales al final del ERP)
                         if 'codigo_limpio' in df_cat.columns:
