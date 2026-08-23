@@ -103,7 +103,6 @@ st.markdown("""
         color: var(--text-color);
     }
 
-    /* Ocultar texto residual de elementos colapsables de Streamlit */
     header [data-testid="stHeader"] span, 
     header [data-testid="collapsedControl"] span,
     section[data-testid="stSidebar"] button[kind="header"] span {
@@ -609,13 +608,12 @@ if tab_escaneo is not None:
 # ------------------------------------------
 if tab_admin_user is not None:
     with tab_admin_user:
-        st.subheader("👥 Agregar Nuevo Nodo de Usuario")
+        st.subheader("👥 Agregar Usuario")
         with st.form("nuevo_u"):
             col_u1, col_u2 = st.columns(2)
             with col_u1:
                 u_n = st.text_input("Usuario")
             with col_u2:
-                # Se deja en texto plano a propósito para que verifiques lo que escribes al crearlo.
                 p_n = st.text_input("Contraseña")
             if st.form_submit_button("Agregar Usuario"):
                 if u_n and p_n:
@@ -628,7 +626,7 @@ if tab_admin_user is not None:
                             "nombre_completo": "",
                             "meta_mensual": 0.0
                         }).execute()
-                        st.success(f"Nodo creado para el usuario {u_n.strip()}")
+                        st.success(f"Usuario {u_n.strip()} agregado correctamente.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error al crear usuario: {e}")
@@ -636,10 +634,34 @@ if tab_admin_user is not None:
                     st.warning("Debes llenar el usuario y la contraseña.")
                     
         st.markdown("---")
-        st.subheader("🔑 Gestionar Contraseñas y Permisos")
-        st.info("Visualiza y edita las contraseñas o el rol de acceso directamente en esta tabla. No olvides dar clic en 'Guardar Cambios'.")
+        st.subheader("🗑️ Eliminar Usuario")
+        # Traemos la lista actual de usuarios para poblar el selector
+        res_usuarios_existentes = supabase.table("usuarios").select("username").execute().data
+        lista_usernames = [row["username"] for row in res_usuarios_existentes] if res_usuarios_existentes else []
         
-        # Traemos username, password y rol directamente desde Supabase
+        if lista_usernames:
+            with st.form("form_eliminar_usuario"):
+                usuario_a_borrar = st.selectbox("Selecciona el usuario que deseas eliminar:", options=lista_usernames)
+                # Evitamos que el usuario principal 'admin' se borre por accidente
+                btn_borrar = st.form_submit_button("Eliminar Usuario Seleccionado", type="primary")
+                
+                if btn_borrar:
+                    if usuario_a_borrar.lower() == "admin":
+                        st.error("⚠️ Por seguridad, no se puede eliminar al usuario administrador principal.")
+                    else:
+                        try:
+                            supabase.table("usuarios").delete().eq("username", usuario_a_borrar).execute()
+                            st.success(f"🗑️ El usuario '{usuario_a_borrar}' ha sido eliminado de la red.")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Error al eliminar usuario: {ex}")
+        else:
+            st.info("No hay usuarios adicionales registrados.")
+
+        st.markdown("---")
+        st.subheader("🔑 Gestionar Contraseñas y Permisos")
+        st.info("Visualiza y edita las contraseñas o el rol de acceso directamente en esta tabla. No olvides dar clic en 'Guardar Cambios de Usuarios'.")
+        
         res_u_list = supabase.table("usuarios").select("username, password, rol").execute().data
         if res_u_list:
             df_u_pass = pd.DataFrame(res_u_list)
