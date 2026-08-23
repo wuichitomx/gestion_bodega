@@ -207,6 +207,33 @@ if tab_admin_erp is not None:
                 st.info("👉 Ahora puedes ir a la pestaña '📊 Performance & KPIs' para ver los resultados actualizados.")
             except Exception as ex:
                 st.error(f"Error al procesar el CSV: {ex}")
+        
+        # ==========================================
+        # NUEVA SECCIÓN: CARGA DE CATÁLOGO A SUPABASE
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📦 Cargar Catálogo de Inventario a la Nube")
+        st.info("Sube aquí el archivo CSV de tu ERP (RPInv_Extracto_Referencia) para actualizar los productos y existencias en Supabase.")
+
+        archivo_catalogo = st.file_uploader("Subir CSV de Catálogo", type=["csv"], key="cat_csv")
+
+        if archivo_catalogo is not None:
+            if st.button("🚀 Actualizar Catálogo en Supabase"):
+                try:
+                    with st.spinner("Procesando y subiendo a la nube... Esto puede tomar unos segundos."):
+                        # Leer el archivo CSV
+                        df_cat = pd.read_csv(archivo_catalogo, encoding='latin1')
+                        
+                        # Convertir los datos a una lista de diccionarios que Supabase entienda
+                        registros = df_cat.to_dict(orient="records")
+                        
+                        # Hacemos un UPSERT (Actualiza si el código ya existe, o lo crea si es nuevo)
+                        supabase.table("catalogo_erp").upsert(registros).execute()
+                        
+                        st.success(f"✅ ¡Catálogo actualizado exitosamente! Se procesaron {len(registros)} artículos.")
+                except Exception as ex:
+                    st.error(f"⚠️ Error al subir el catálogo: {ex}")
+        # ==========================================
                 
         st.markdown("---")
         st.subheader("⚙️ Configuración de Metas por Asesor")
