@@ -140,7 +140,7 @@ with st.sidebar:
     st.markdown("---")
 
 # ==========================================
-# FUNCIONES DE IA (Llama a configuracion_ia.py)
+# FUNCIONES DE IA
 # ==========================================
 def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
     try:
@@ -151,10 +151,7 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
             return res_db[0].get("tips"), "⚡ (Obtenido de la base de datos)"
         
         model = genai.GenerativeModel('gemini-3.7-flash')
-        
-        # LLAMADA A NUESTRO ARCHIVO DE CONFIGURACIÓN MAESTRO
         prompt_maestro = generar_prompt_maestro(nombre_producto, ref_limpia, categoria)
-        
         response = model.generate_content(prompt_maestro)
         nuevo_texto = response.text
         
@@ -199,8 +196,6 @@ if tab_admin_erp is not None:
                 df_raw['ASP_T_num'] = pd.to_numeric(df_raw['textbox20'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
                 
                 df_raw.to_csv("ventas_diarias_temp.csv", index=False)
-                
-                # Reseteamos el candado global de globos si el admin sube un nuevo corte
                 st.session_state.felicitacion_mostrada = False
                 
                 st.success("✅ Reporte de ventas cargado y guardado correctamente.")
@@ -209,7 +204,7 @@ if tab_admin_erp is not None:
                 st.error(f"Error al procesar el CSV: {ex}")
         
         # ==========================================
-        # NUEVA SECCIÓN: CARGA DE CATÁLOGO A SUPABASE
+        # NUEVA SECCIÓN: CARGA DE CATÁLOGO A SUPABASE CON TRADUCTOR
         # ==========================================
         st.markdown("---")
         st.subheader("📦 Cargar Catálogo de Inventario a la Nube")
@@ -220,20 +215,52 @@ if tab_admin_erp is not None:
         if archivo_catalogo is not None:
             if st.button("🚀 Actualizar Catálogo en Supabase"):
                 try:
-                    with st.spinner("Procesando y subiendo a la nube... Esto puede tomar unos segundos."):
-                        # Leer el archivo CSV saltando las primeras 5 líneas de basura del ERP
-                        df_cat = pd.read_csv(archivo_catalogo, encoding='latin1', skiprows=5)
+                    with st.spinner("Procesando y subiendo a la nube... Esto puede tomar un par de minutos dependiendo del tamaño del archivo."):
+                        # 1. Leer el archivo como texto puro saltando las 5 líneas de encabezado
+                        df_cat = pd.read_csv(archivo_catalogo, encoding='latin1', skiprows=5, dtype=str)
                         
-                        # EL TRUCO DEFINITIVO: Convertir a objeto genérico y luego quitar los NaN
+                        # 2. Diccionario Traductor: 'Nombre en ERP' : 'Nombre en Supabase'
+                        mapeo_columnas = {
+                            'CodigoAlterno': 'codigo_limpio',
+                            'Referencia': 'referencia',
+                            'Descripcion': 'descripcion',
+                            'Cantidad': 'stock_sistema',
+                            'Nivel1': 'nivel1',
+                            'Nivel2': 'nivel2',
+                            'Nivel3': 'nivel3',
+                            'Nivel4': 'nivel4'
+                        }
+                        
+                        # Aplicar la traducción de nombres
+                        df_cat = df_cat.rename(columns=mapeo_columnas)
+                        
+                        # 3. Extraer la talla automáticamente desde la referencia (ej: 280647-10 saca el '10')
+                        if 'referencia' in df_cat.columns:
+                            df_cat['talla'] = df_cat['referencia'].apply(lambda x: str(x).split('-', 1)[1] if '-' in str(x) else '')
+                        
+                        # 4. Quedarnos ÚNICAMENTE con las columnas que Supabase espera, ignorando las extras
+                        columnas_esperadas = ['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'nivel2', 'nivel3', 'nivel4', 'stock_sistema']
+                        columnas_existentes = [col for col in columnas_esperadas if col in df_cat.columns]
+                        df_cat = df_cat[columnas_existentes]
+                        
+                        # 5. Asegurar que el stock sea formato número
+                        if 'stock_sistema' in df_cat.columns:
+                            df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0)
+                        
+                        # 6. Eliminar filas que vengan sin código de barras (generalmente subtotales al final del ERP)
+                        if 'codigo_limpio' in df_cat.columns:
+                            df_cat = df_cat.dropna(subset=['codigo_limpio'])
+                        
+                        # 7. Convertir vacíos a nulos de base de datos
                         df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
                         
-                        # Convertir los datos a una lista de diccionarios que Supabase entienda
+                        # 8. Convertir y mandar en paquetes a Supabase
                         registros = df_cat.to_dict(orient="records")
                         
-                        # Hacemos un UPSERT (Actualiza si el código ya existe, o lo crea si es nuevo)
+                        # Inyectar los datos en Supabase (Actualiza o Crea nuevo)
                         supabase.table("catalogo_erp").upsert(registros).execute()
                         
-                        st.success(f"✅ ¡Catálogo actualizado exitosamente! Se procesaron {len(registros)} artículos.")
+                        st.success(f"✅ ¡Catálogo actualizado exitosamente! Se subieron {len(registros)} artículos a la base de datos.")
                 except Exception as ex:
                     st.error(f"⚠️ Error al subir el catálogo: {ex}")
         # ==========================================
@@ -244,7 +271,6 @@ if tab_admin_erp is not None:
         res_u = supabase.table("usuarios").select("*").execute().data
         if res_u:
             df_u = pd.DataFrame(res_u)
-            
             for col in ['codigo_erp', 'nombre_completo', 'meta_mensual']:
                 if col not in df_u.columns:
                     df_u[col] = ""
@@ -255,12 +281,7 @@ if tab_admin_erp is not None:
                     "username": st.column_config.TextColumn("Usuario App", disabled=True),
                     "codigo_erp": st.column_config.TextColumn("Código ERP"),
                     "nombre_completo": st.column_config.TextColumn("Nombre Completo"),
-                    "meta_mensual": st.column_config.NumberColumn(
-                        "Meta Mensual ($)", 
-                        format="$%.2f", 
-                        step=0.01, 
-                        min_value=0.0
-                    )
+                    "meta_mensual": st.column_config.NumberColumn("Meta Mensual ($)", format="$%.2f", step=0.01, min_value=0.0)
                 },
                 use_container_width=True
             )
@@ -279,13 +300,11 @@ if tab_admin_erp is not None:
 # 1. PESTAÑA: PERFORMANCE & KPIS
 # ------------------------------------------
 with tab_perf:
-    
     if not os.path.exists("ventas_diarias_temp.csv"):
         st.header("📊 Tablero de Rendimiento Diario")
         st.info("ℹ️ No se ha cargado el reporte de ventas del día. El administrador puede subirlo en la pestaña '⚙️ Admin & Carga ERP'.")
     else:
         df_v = pd.read_csv("ventas_diarias_temp.csv")
-        
         res_u = supabase.table("usuarios").select("*").execute().data
         df_users = pd.DataFrame(res_u) if res_u else pd.DataFrame()
         
@@ -295,7 +314,6 @@ with tab_perf:
         else:
             df_v['meta_mensual'] = 0.0
 
-        # Totales Tienda
         venta_tienda_neto = df_v['Neto_T_num'].iloc[0] if 'Neto_T_num' in df_v.columns else 0.0
         meta_tienda_total = df_v['meta_mensual'].sum() if df_v['meta_mensual'].sum() > 0 else 1571112.40
         alcance_tienda_pct = (venta_tienda_neto / meta_tienda_total) * 100 if meta_tienda_total > 0 else 0
@@ -328,9 +346,6 @@ with tab_perf:
             atv_asesor = row_asesor.get('ATV_D_num', 0.0)
             asp_asesor = row_asesor.get('ASP_D_num', 0.0)
 
-            # ==========================================
-            # MENSAJES DE MOTIVACIÓN (GAMIFICACIÓN)
-            # ==========================================
             df_ranked = df_v.sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
             if not df_ranked.empty:
                 primer_lugar_nombre = df_ranked.iloc[0]['nombre']
@@ -339,7 +354,6 @@ with tab_perf:
                 if "admin" not in st.session_state.usuario_actual.lower():
                     if str(nombre_asesor) == str(primer_lugar_nombre):
                         st.success(f"🏆 ¡Felicidades, {nombre_asesor}! Eres el primer lugar en ventas, continúa así.")
-                        # Candado: Si no se ha mostrado en esta sesión, los lanza.
                         if not st.session_state.felicitacion_mostrada:
                             st.balloons()
                             st.session_state.felicitacion_mostrada = True
@@ -349,9 +363,7 @@ with tab_perf:
             
             st.header("📊 Tablero de Rendimiento Diario")
 
-            # BLOQUE 1: COMPARATIVA PRINCIPAL (TIENDA VS ASESOR)
             col_t, col_a = st.columns(2)
-            
             with col_t:
                 st.subheader("🏬 PERFORMANCE TIENDA")
                 st.markdown(f"""
@@ -380,34 +392,13 @@ with tab_perf:
             st.subheader("🎯 Comparativa de KPIs Operativos")
             
             kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
-            
             with kpi_c1:
-                diff_upt = upt_asesor - upt_tienda
-                st.metric(
-                    label="UPT (Unidades x Ticket)", 
-                    value=f"{upt_asesor:.2f}", 
-                    delta=f"{diff_upt:+.2f} vs Tienda ({upt_tienda:.2f})"
-                )
-            
+                st.metric(label="UPT (Unidades x Ticket)", value=f"{upt_asesor:.2f}", delta=f"{upt_asesor - upt_tienda:+.2f} vs Tienda ({upt_tienda:.2f})")
             with kpi_c2:
-                diff_atv = atv_asesor - atv_tienda
-                st.metric(
-                    label="ATV (Ticket Promedio)", 
-                    value=f"${atv_asesor:,.2f}", 
-                    delta=f"${diff_atv:+,.2f} vs Tienda (${atv_tienda:,.2f})"
-                )
-
+                st.metric(label="ATV (Ticket Promedio)", value=f"${atv_asesor:,.2f}", delta=f"${atv_asesor - atv_tienda:+,.2f} vs Tienda (${atv_tienda:,.2f})")
             with kpi_c3:
-                diff_asp = asp_asesor - asp_tienda
-                st.metric(
-                    label="ASP (Precio Promedio)", 
-                    value=f"${asp_asesor:,.2f}", 
-                    delta=f"${diff_asp:+,.2f} vs Tienda (${asp_tienda:,.2f})"
-                )
+                st.metric(label="ASP (Precio Promedio)", value=f"${asp_asesor:,.2f}", delta=f"${asp_asesor - asp_tienda:+,.2f} vs Tienda (${asp_tienda:,.2f})")
 
-            # ==========================================
-            # BLOQUE 2: GRÁFICA DE BARRAS CON ALTAIR
-            # ==========================================
             st.markdown("---")
             st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
             
@@ -419,15 +410,7 @@ with tab_perf:
                 y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
                 color=alt.Color('Color:N', scale=None)
             )
-            
-            text = bars.mark_text(
-                align='center',
-                baseline='bottom',
-                dy=-5,
-                color='white'
-            ).encode(
-                text=alt.Text('Neto_D_num:Q', format='$,.0f')
-            )
+            text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
             
             st.altair_chart(bars + text, use_container_width=True)
 
@@ -451,16 +434,11 @@ with tab_busqueda:
         res = query.limit(50).execute() 
         if res.data:
             df = pd.DataFrame(res.data)
-
-            # Buscamos en la tabla 'ubicaciones' dónde está guardado cada
-            # código que apareció en los resultados, y lo unimos a la tabla.
             codigos_encontrados = df['codigo_limpio'].dropna().astype(str).unique().tolist()
             if codigos_encontrados:
                 res_ubic = supabase.table("ubicaciones").select("codigo_limpio, ubicacion, cantidad").in_("codigo_limpio", codigos_encontrados).execute()
                 if res_ubic.data:
                     df_ubic = pd.DataFrame(res_ubic.data)
-                    # Un mismo código puede estar repartido en varias ubicaciones,
-                    # así que las juntamos en un solo texto por código.
                     df_ubic['ubicacion_texto'] = df_ubic['ubicacion'].astype(str) + " (" + df_ubic['cantidad'].astype(str) + " pza)"
                     df_ubic_agrupado = df_ubic.groupby('codigo_limpio')['ubicacion_texto'].apply(lambda x: ", ".join(x)).reset_index()
                     df_ubic_agrupado = df_ubic_agrupado.rename(columns={'ubicacion_texto': 'ubicacion'})
@@ -482,7 +460,6 @@ with tab_busqueda:
             st.markdown("---")
             st.markdown("#### 🤖 Asistente de Ventas en Piso")
             with st.expander(f"✨ Ver Tips de Venta para {codigo_detectado}", expanded=False):
-                # Botón de regeneración para sobreescribir tips viejos si se requiere
                 if st.button("Regenerar argumentos con IA", key="btn_ia_manual_regen"):
                     supabase.table("tips_ia").delete().eq("referencia", codigo_detectado).execute()
                     
