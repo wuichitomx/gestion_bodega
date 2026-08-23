@@ -224,6 +224,9 @@ if tab_admin_erp is not None:
                         # Leer el archivo CSV saltando las primeras 5 líneas de basura del ERP
                         df_cat = pd.read_csv(archivo_catalogo, encoding='latin1', skiprows=5)
                         
+                        # NUEVO: Limpiar celdas vacías (NaN) para que Supabase las acepte
+                        df_cat = df_cat.where(pd.notna(df_cat), None)
+                        
                         # Convertir los datos a una lista de diccionarios que Supabase entienda
                         registros = df_cat.to_dict(orient="records")
                         
