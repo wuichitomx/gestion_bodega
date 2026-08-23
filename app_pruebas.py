@@ -50,16 +50,25 @@ def render_logo(ruta_imagen, width=160):
         <style>
         .logo-light-container img {{ display: block; width: {width}px; margin-bottom: 15px; }}
         .logo-dark-container img {{ display: none; width: {width}px; margin-bottom: 15px; }}
+        .logo-wrapper {{
+            background: rgba(255, 255, 255, 0.05);
+            padding: 12px;
+            border-radius: 10px;
+            display: inline-block;
+            border: 1px solid rgba(255, 230, 0, 0.2);
+        }}
         @media (prefers-color-scheme: dark) {{
             .logo-light-container img {{ display: none; }}
             .logo-dark-container img {{ display: block; }}
         }}
         </style>
-        <div class="logo-light-container">
-            <img src="data:image/png;base64,{b64_orig}">
-        </div>
-        <div class="logo-dark-container">
-            <img src="data:image/png;base64,{b64_inv}">
+        <div class="logo-wrapper">
+            <div class="logo-light-container">
+                <img src="data:image/png;base64,{b64_orig}">
+            </div>
+            <div class="logo-dark-container">
+                <img src="data:image/png;base64,{b64_inv}">
+            </div>
         </div>
         """
         st.markdown(css, unsafe_allow_html=True)
@@ -67,18 +76,16 @@ def render_logo(ruta_imagen, width=160):
         pass
 
 # ==========================================
-# ESTILO VISUAL "SINAPSIS" (TRON / CYBERPUNK & AMARILLO ELÉCTRICO)
+# ESTILO VISUAL "SINAPSIS" (TRON / CYBERPUNK)
 # ==========================================
 st.markdown("""
     <style>
-    /* Importamos tipografía estilo Tron (Orbitron) y fuente limpia Inter */
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Inter:wght@300;400;500;600&display=swap');
 
     html, body, [class*="st"] {
         font-family: 'Inter', sans-serif !important;
     }
 
-    /* Aplicamos estilo Tron futurista a los títulos principales */
     h1, h2, h3, .stHeader {
         font-family: 'Orbitron', sans-serif !important;
         letter-spacing: 1px;
@@ -88,9 +95,10 @@ st.markdown("""
         color: var(--text-color);
     }
 
-    /* Ocultamos texto plano residual de iconos nativos en la barra lateral */
-    button[kind="header"] svg {
-        fill: #FFE600 !important;
+    /* Ocultar texto residual de iconos colapsables de Streamlit */
+    header [data-testid="stHeader"] span, 
+    header [data-testid="collapsedControl"] span {
+        display: none !important;
     }
 
     .stAlert, div[data-testid="stExpander"] {
@@ -98,7 +106,6 @@ st.markdown("""
         border: 1px solid rgba(255, 230, 0, 0.3);
     }
 
-    /* Tarjetas tipo Nodo Sináptico con acentos en Amarillo Neón */
     .kpi-card {
         background: linear-gradient(135deg, rgba(0, 240, 255, 0.03) 0%, rgba(255, 230, 0, 0.05) 100%);
         padding: 18px;
@@ -121,7 +128,15 @@ st.markdown("""
         font-family: 'Orbitron', sans-serif !important;
     }
 
-    /* Botones principales */
+    /* Ajuste de tamaño para el título de bienvenida en login y evitar que se corte */
+    .login-title {
+        font-family: 'Orbitron', sans-serif !important;
+        font-size: 1.8rem !important;
+        font-weight: 700;
+        color: #FFFFFF;
+        white-space: nowrap;
+    }
+
     .stButton button[kind="primary"], div.stButton > button {
         border-radius: 8px;
         font-weight: 500;
@@ -146,11 +161,11 @@ if "felicitacion_mostrada" not in st.session_state:
     st.session_state.felicitacion_mostrada = False
 
 if not st.session_state.autenticado:
-    col_a, col_b, col_c = st.columns([1, 2, 1])
+    col_a, col_b, col_c = st.columns([0.5, 3, 0.5])
     with col_b:
         render_logo("logo_adidas.png", 160)
         
-        st.title("⚡ ¡Bienvenid@s a Sinapsis!")
+        st.markdown('<p class="login-title">⚡ ¡Bienvenid@s a Sinápsis!</p>', unsafe_allow_html=True)
         st.caption("v3.4 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
@@ -180,7 +195,7 @@ if not st.session_state.autenticado:
 # ==========================================
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
-    st.markdown("### ⚡ Sinapsis")
+    st.markdown("### ⚡ Sinápsis")
     st.caption("🚀 **Versión:** 3.4 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
@@ -215,7 +230,7 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
 # ==========================================
-st.title("⚡ Sinapsis")
+st.title("⚡ Sinápsis")
 
 if st.session_state.es_admin:
     tabs = st.tabs(["📊 Performance & KPIs", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
