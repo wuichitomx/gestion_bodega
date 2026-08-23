@@ -539,7 +539,7 @@ with tab_busqueda:
     col1, col2, col3 = st.columns(3)
     in_ref = col1.text_input("🔍 Ref/Desc:", key="in_ref")
     in_talla = col2.text_input("📏 Talla:", key="in_talla")
-    in_ubic = col3.text_input("🏢 Depto:", key="in_ubic")
+    in_ubic = col3.text_input("🏢 Estante/Ubicación:", key="in_ubic")
 
     # El checkbox de "Ocultar stock en 0" solo lo ve el admin; para el
     # asesor simplemente siempre filtramos el stock en 0 (no le sirve
@@ -550,11 +550,26 @@ with tab_busqueda:
         solo_disp = True
         
     if st.button("Buscar en la Red") or in_ref or in_talla or in_ubic:
+        # Si se busca por estante, primero preguntamos en la tabla
+        # 'ubicaciones' qué códigos viven ahí (ej. "A3"), y luego filtramos
+        # el catálogo solo a esos códigos. Antes esto buscaba por error
+        # dentro de nivel1/nivel2 (categoría), que es una tabla distinta y
+        # nunca iba a encontrar coincidencia con un nombre de estante.
+        codigos_en_ubicacion = None
+        if in_ubic:
+            res_ubic_busqueda = supabase.table("ubicaciones").select("codigo_limpio").ilike("ubicacion", f"%{in_ubic.strip()}%").execute()
+            codigos_en_ubicacion = list({item['codigo_limpio'] for item in (res_ubic_busqueda.data or [])})
+            if not codigos_en_ubicacion:
+                st.warning(f"⚠️ No hay artículos escaneados en la ubicación '{in_ubic.strip()}'.")
+
         query = supabase.table("catalogo_erp").select("*")
         if solo_disp: query = query.gt("stock_sistema", 0)
-        if in_ref: query = query.or_(f"referencia.ilike.%{in_ref.strip()}%,descripcion.ilike.%{in_ref.strip()}%")
+        if in_ref: query = query.or_(f"referencia.ilike.%{in_ref.strip()}%,descripcion.ilike.%{in_ref.strip()}%,nivel1.ilike.%{in_ref.strip()}%,nivel2.ilike.%{in_ref.strip()}%,nivel3.ilike.%{in_ref.strip()}%")
         if in_talla: query = query.like("talla", f"{in_talla.strip()}%")
-        if in_ubic: query = query.or_(f"nivel1.ilike.%{in_ubic.strip()}%,nivel2.ilike.%{in_ubic.strip()}%")
+        if codigos_en_ubicacion is not None:
+            if not codigos_en_ubicacion:
+                codigos_en_ubicacion = ["__sin_resultados__"]  # fuerza que la búsqueda no traiga nada
+            query = query.in_("codigo_limpio", codigos_en_ubicacion)
         
         res = query.limit(50).execute() 
         if res.data:
