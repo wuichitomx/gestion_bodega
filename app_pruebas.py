@@ -11,7 +11,7 @@ from PIL import Image, ImageOps
 # Importamos las reglas maestras desde nuestro nuevo archivo
 from configuracion_ia import generar_prompt_maestro
 
-st.set_page_config(page_title="Sinapsis | Sistema de Bodega & Performance", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Sinapsis", page_icon="⚡", layout="wide")
 
 # ==========================================
 # CONFIGURACIÓN SUPABASE E IA
@@ -67,11 +67,10 @@ def render_logo(ruta_imagen, width=160):
         pass
 
 # ==========================================
-# ESTILO VISUAL "SINAPSIS" (NEURO-TECH & CHISPA)
+# ESTILO VISUAL "SINAPSIS" (NEURO-TECH & AMARILLO ELÉCTRICO)
 # ==========================================
 st.markdown("""
     <style>
-    /* Importamos fuente moderna y limpia de alta legibilidad */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
     html, body, [class*="st"] {
@@ -84,16 +83,16 @@ st.markdown("""
 
     .stAlert, div[data-testid="stExpander"] {
         border-radius: 12px;
-        border: 1px solid rgba(0, 240, 255, 0.2);
+        border: 1px solid rgba(255, 230, 0, 0.3);
     }
 
-    /* Tarjetas tipo Nodo Sináptico (KPIs) */
+    /* Tarjetas tipo Nodo Sináptico con acentos en Amarillo Neón */
     .kpi-card {
-        background: linear-gradient(135deg, rgba(0, 240, 255, 0.05) 0%, rgba(155, 81, 224, 0.05) 100%);
+        background: linear-gradient(135deg, rgba(0, 240, 255, 0.03) 0%, rgba(255, 230, 0, 0.05) 100%);
         padding: 18px;
         border-radius: 12px;
-        border-left: 5px solid #00F0FF;
-        border-top: 1px solid rgba(0, 240, 255, 0.1);
+        border-left: 5px solid #FFE600;
+        border-top: 1px solid rgba(255, 230, 0, 0.15);
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
         margin-bottom: 10px;
         transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -101,25 +100,24 @@ st.markdown("""
     
     .kpi-card:hover {
         transform: translateY(-2px);
-        box-shadow: 0 6px 25px rgba(0, 240, 255, 0.15);
+        box-shadow: 0 6px 25px rgba(255, 230, 0, 0.2);
     }
 
     .kpi-card h4 {
-        color: #9B51E0;
+        color: #FFE600;
         font-weight: 600;
     }
 
-    /* Botones principales con acento de Chispa Sináptica (Amarillo Neón) */
+    /* Botones principales */
     .stButton button[kind="primary"], div.stButton > button {
         border-radius: 8px;
         font-weight: 500;
         transition: all 0.3s ease;
     }
 
-    /* Resaltado especial para botones de acción clave */
     div.stButton > button:hover {
-        border-color: #00F0FF;
-        box-shadow: 0 0 12px rgba(0, 240, 255, 0.4);
+        border-color: #FFE600;
+        box-shadow: 0 0 12px rgba(255, 230, 0, 0.4);
     }
     </style>
 """, unsafe_allow_html=True)
@@ -139,7 +137,7 @@ if not st.session_state.autenticado:
     with col_b:
         render_logo("logo_adidas.png", 160)
         
-        st.title("⚡ Sinapsis")
+        st.title("⚡ Bienvenida Sinapsis")
         st.caption("v3.4 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
@@ -204,7 +202,7 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
 # ==========================================
-st.title("⚡ Sinapsis: Red de Bodega & Performance")
+st.title("⚡ Sinapsis")
 
 if st.session_state.es_admin:
     tabs = st.tabs(["📊 Performance & KPIs", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
@@ -424,15 +422,15 @@ with tab_perf:
             with kpi_c1:
                 st.metric(label="UPT (Unidades x Ticket)", value=f"{upt_asesor:.2f}", delta=f"{upt_asesor - upt_tienda:+.2f} vs Tienda ({upt_tienda:.2f})")
             with kpi_c2:
-                st.metric(label="ATV (Ticket Promedio)", value=f"${atv_asesor:,.2f}", delta=f"${atv_asesor - atv_tienda:+,.2f} vs Tienda (${atv_tienda:,.2f})")
+                st.metric(label="ATV (Ticket Promedio)", value=f"${atv_asesor:,.2f}", delta=f"${atv_asesor - atv_tienda:+,.2f} vs Tienda (${atv_tienda:.2f})")
             with kpi_c3:
-                st.metric(label="ASP (Precio Promedio)", value=f"${asp_asesor:,.2f}", delta=f"${asp_asesor - asp_tienda:+,.2f} vs Tienda (${asp_tienda:,.2f})")
+                st.metric(label="ASP (Precio Promedio)", value=f"${asp_asesor:,.2f}", delta=f"${asp_asesor - asp_tienda:+,.2f} vs Tienda (${asp_tienda:.2f})")
 
             st.markdown("---")
             st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
             
             df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#00F0FF' if str(x) == str(nombre_asesor) else '#9B51E0')
+            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#FFE600' if str(x) == str(nombre_asesor) else '#00F0FF')
             
             bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
                 x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
