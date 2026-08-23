@@ -67,18 +67,30 @@ def render_logo(ruta_imagen, width=160):
         pass
 
 # ==========================================
-# ESTILO VISUAL "SINAPSIS" (NEURO-TECH & AMARILLO ELÉCTRICO)
+# ESTILO VISUAL "SINAPSIS" (TRON / CYBERPUNK & AMARILLO ELÉCTRICO)
 # ==========================================
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    /* Importamos tipografía estilo Tron (Orbitron) y fuente limpia Inter */
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Inter:wght@300;400;500;600&display=swap');
 
     html, body, [class*="st"] {
         font-family: 'Inter', sans-serif !important;
     }
 
+    /* Aplicamos estilo Tron futurista a los títulos principales */
+    h1, h2, h3, .stHeader {
+        font-family: 'Orbitron', sans-serif !important;
+        letter-spacing: 1px;
+    }
+
     [data-testid="stAppViewContainer"] {
         color: var(--text-color);
+    }
+
+    /* Ocultamos texto plano residual de iconos nativos en la barra lateral */
+    button[kind="header"] svg {
+        fill: #FFE600 !important;
     }
 
     .stAlert, div[data-testid="stExpander"] {
@@ -106,6 +118,7 @@ st.markdown("""
     .kpi-card h4 {
         color: #FFE600;
         font-weight: 600;
+        font-family: 'Orbitron', sans-serif !important;
     }
 
     /* Botones principales */
@@ -137,7 +150,7 @@ if not st.session_state.autenticado:
     with col_b:
         render_logo("logo_adidas.png", 160)
         
-        st.title("⚡ Bienvenida Sinapsis")
+        st.title("⚡ ¡Bienvenid@s a Sinapsis!")
         st.caption("v3.4 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
@@ -420,11 +433,29 @@ with tab_perf:
             
             kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
             with kpi_c1:
-                st.metric(label="UPT (Unidades x Ticket)", value=f"{upt_asesor:.2f}", delta=f"{upt_asesor - upt_tienda:+.2f} vs Tienda ({upt_tienda:.2f})")
+                diff_upt = upt_asesor - upt_tienda
+                st.metric(
+                    label="UPT (Unidades x Ticket)", 
+                    value=f"{upt_asesor:.2f}", 
+                    delta=f"{diff_upt:+.2f} vs Tienda ({upt_tienda:.2f})",
+                    delta_color="normal" if diff_upt >= 0 else "inverse"
+                )
             with kpi_c2:
-                st.metric(label="ATV (Ticket Promedio)", value=f"${atv_asesor:,.2f}", delta=f"${atv_asesor - atv_tienda:+,.2f} vs Tienda (${atv_tienda:.2f})")
+                diff_atv = atv_asesor - atv_tienda
+                st.metric(
+                    label="ATV (Ticket Promedio)", 
+                    value=f"${atv_asesor:,.2f}", 
+                    delta=f"${diff_atv:+,.2f} vs Tienda (${atv_tienda:,.2f})",
+                    delta_color="normal" if diff_atv >= 0 else "inverse"
+                )
             with kpi_c3:
-                st.metric(label="ASP (Precio Promedio)", value=f"${asp_asesor:,.2f}", delta=f"${asp_asesor - asp_tienda:+,.2f} vs Tienda (${asp_tienda:.2f})")
+                diff_asp = asp_asesor - asp_tienda
+                st.metric(
+                    label="ASP (Precio Promedio)", 
+                    value=f"${asp_asesor:,.2f}", 
+                    delta=f"${diff_asp:+,.2f} vs Tienda (${asp_tienda:,.2f})",
+                    delta_color="normal" if diff_asp >= 0 else "inverse"
+                )
 
             st.markdown("---")
             st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
