@@ -8,7 +8,7 @@ from supabase import create_client
 import google.generativeai as genai
 from PIL import Image, ImageOps
 
-# Importamos las reglas maestras desde nuestro nuevo archivo
+# Importamos las reglas maestras desde nuestro archivo de configuración
 from configuracion_ia import generar_prompt_maestro
 
 st.set_page_config(page_title="Sinapsis", page_icon="⚡", layout="wide")
@@ -537,7 +537,17 @@ with tab_busqueda:
 
         query = supabase.table("catalogo_erp").select("*")
         if solo_disp: query = query.gt("stock_sistema", 0)
-        if in_ref: query = query.or_(f"referencia.ilike.%{in_ref.strip()}%,descripcion.ilike.%{in_ref.strip()}%,nivel1.ilike.%{in_ref.strip()}%,nivel2.ilike.%{in_ubic.strip()}%,nivel3.ilike.%{in_ref.strip()}%")
+        
+        # AQUÍ ESTÁ EL FILTRO CORREGIDO Y LIMPIO
+        if in_ref: 
+            query = query.or_(
+                f"referencia.ilike.%{in_ref.strip()}%, "
+                f"descripcion.ilike.%{in_ref.strip()}%, "
+                f"nivel1.ilike.%{in_ref.strip()}%, "
+                f"nivel2.ilike.%{in_ref.strip()}%, "
+                f"nivel3.ilike.%{in_ref.strip()}%"
+            )
+            
         if in_talla: query = query.like("talla", f"{in_talla.strip()}%")
         if codigos_en_ubicacion is not None:
             if not codigos_en_ubicacion:
@@ -635,14 +645,12 @@ if tab_admin_user is not None:
                     
         st.markdown("---")
         st.subheader("🗑️ Eliminar Usuario")
-        # Traemos la lista actual de usuarios para poblar el selector
         res_usuarios_existentes = supabase.table("usuarios").select("username").execute().data
         lista_usernames = [row["username"] for row in res_usuarios_existentes] if res_usuarios_existentes else []
         
         if lista_usernames:
             with st.form("form_eliminar_usuario"):
                 usuario_a_borrar = st.selectbox("Selecciona el usuario que deseas eliminar:", options=lista_usernames)
-                # Evitamos que el usuario principal 'admin' se borre por accidente
                 btn_borrar = st.form_submit_button("Eliminar Usuario Seleccionado", type="primary")
                 
                 if btn_borrar:
