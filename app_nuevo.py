@@ -1,504 +1,698 @@
-import base64
-from datetime import datetime
 import os
+import io
+import base64
 import pandas as pd
 import streamlit as st
+import altair as alt
 from supabase import create_client
+import google.generativeai as genai
+from PIL import Image, ImageOps
 
-st.set_page_config(page_title="Sistema de Bodega", layout="wide")
+# Importamos las reglas maestras desde nuestro archivo de configuración
+from configuracion_ia import generar_prompt_maestro
+
+st.set_page_config(page_title="Sinapsis", page_icon="⚡", layout="wide")
 
 # ==========================================
-# CONFIGURACIÓN SUPABASE
+# CONFIGURACIÓN SUPABASE E IA
 # ==========================================
 try:
-  url = st.secrets["SUPABASE_URL"]
-  key = st.secrets["SUPABASE_KEY"]
-  supabase = create_client(url, key)
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    supabase = create_client(url, key)
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception as e:
-  st.error(f"🚨 Error crítico al leer las credenciales: {e}")
+    st.error(f"Error crítico de conexión: {e}")
+    st.stop()
 
 # ==========================================
-# ESTILO VISUAL (CSS)
+# FUNCIÓN LOGO DINÁMICO (CLARO / OSCURO)
 # ==========================================
-st.markdown(
-    """
-<style>
-[data-testid="stAppViewContainer"] * {
-    color: #000000 !important;
-}
-button[data-baseweb="tab"] p, button[data-baseweb="tab"] div, [data-testid="stTab"] p {
-    font-size: 22px !important;
-    font-weight: 900 !important;
-    color: #000000 !important;
-}
-h2, h3, h4 {
-    font-size: 22px !important;
-    font-weight: 800 !important;
-    color: #000000 !important;
-}
-.stTextInput input, .stSelectbox div {
-    font-size: 20px !important;
-    font-weight: 600 !important;
-    color: #000000 !important;
-    background-color: #FFFFFF !important;
-    border: 2px solid #1E3A8A !important;
-    border-radius: 8px !important;
-}
-.stTextInput label, .stRadio label, .stSelectbox label, .stCheckbox label {
-    font-size: 18px !important;
-    font-weight: bold !important;
-    color: #000000 !important;
-}
-[data-testid="stMetricValue"] {
-    font-size: 1.8rem !important;
-    font-weight: 900 !important;
-    color: #000000 !important;
-}
-[data-testid="stMetricLabel"] {
-    font-size: 1.1rem !important;
-    font-weight: bold !important;
-    color: #000000 !important;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-def limpiar_codigo(val):
-  if pd.isna(val):
-    return ""
-  s = str(val).strip()
-  if s.endswith(".0"):
-    s = s[:-2]
-  return s
-
-def registrar_busqueda(usuario, codigo):
-  if codigo:
+def render_logo(ruta_imagen, width=160):
+    if not os.path.exists(ruta_imagen):
+        return
     try:
-      supabase.table("bitacora_busquedas").insert({
-          "usuario": usuario,
-          "codigo": codigo,
-          "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-      }).execute()
-    except Exception as e:
-      pass 
-
-# ==========================================
-# CONTROL DE AUTENTICACIÓN (LOGIN)
-# ==========================================
-if "autenticado" not in st.session_state:
-  st.session_state["autenticado"] = False
-  st.session_state["usuario"] = ""
-  st.session_state["rol"] = ""
-
-if not st.session_state["autenticado"]:
-  st.markdown("<h2 style='text-align: center; color: #1E3A8A; margin-top: 50px;'>🔐 Iniciar Sesión - Sistema de Bodega</h2>", unsafe_allow_html=True)
-  col1, col2, col3 = st.columns([1, 2, 1])
-  with col2:
-    with st.form("login_form"):
-      usuario_input = st.text_input("Usuario")
-      password_input = st.text_input("Contraseña", type="password")
-      submit_login = st.form_submit_button("Entrar", use_container_width=True)
-      
-      if submit_login:
-        try:
-          res = supabase.table("usuarios").select("rol").eq("username", usuario_input.strip()).eq("password", password_input.strip()).execute()
-          row = res.data
-        except Exception as e:
-          st.error(f"🚨 Error al conectar con la base de datos: {e}")
-          row = []
+        with open(ruta_imagen, "rb") as f:
+            img_data = f.read()
+        b64_orig = base64.b64encode(img_data).decode()
         
-        if row:
-          st.session_state["autenticado"] = True
-          st.session_state["usuario"] = usuario_input.strip()
-          st.session_state["rol"] = row[0]["rol"]
-          st.rerun()
-        else:
-          st.error("⚠️ Usuario o contraseña incorrectos.")
-  st.stop()
-
-# ==========================================
-# FUNCIONES DE CARGA Y DATOS (SUPABASE)
-# ==========================================
-def extraer_talla(referencia):
-  if pd.isna(referencia):
-    return "N/A"
-  ref_str = str(referencia).strip()
-  if "-" in ref_str:
-    partes = ref_str.split("-", 1)
-    return partes[1].strip()
-  return "N/A"
-
-def extraer_codigos_multiples(cadena_raw):
-  cadena = limpiar_codigo(cadena_raw)
-  if not cadena:
-    return []
-  l = len(cadena)
-  if l == 24:
-    return [cadena[:12], cadena[12:]]
-  elif l == 26:
-    return [cadena[:13], cadena[13:]]
-  elif l == 36:
-    return [cadena[:12], cadena[12:24], cadena[24:]]
-  elif l == 39:
-    return [cadena[:13], cadena[13:26], cadena[26:]]
-  return [cadena]
-
-@st.cache_data
-def cargar_inventario():
-  archivo = "RPInv_Extracto_Referencia.csv"
-  try:
-    df = pd.read_csv(archivo, skiprows=5, encoding="utf-8-sig", dtype=str)
-    if "CodigoAlterno" not in df.columns:
-      df = pd.read_csv(archivo, encoding="utf-8-sig", dtype=str)
-  except Exception:
-    df = pd.read_csv(archivo, encoding="utf-8-sig", dtype=str)
-
-  df = df.dropna(subset=["CodigoAlterno"])
-  df["CodigoLimpio"] = df["CodigoAlterno"].apply(limpiar_codigo)
-  df["Talla"] = df["Referencia"].apply(extraer_talla)
-
-  posibles_cols = ["existencia", "cantidad", "stock", "disponible", "tienda", "cant", "saldo", "unidades"]
-  col_existencia = next((c for c in df.columns if any(p in str(c).lower() for p in posibles_cols)), None)
-
-  if col_existencia:
-    df["Stock_Sistema"] = pd.to_numeric(df[col_existencia], errors="coerce").fillna(0).astype(int)
-  else:
-    df["Stock_Sistema"] = 0
-
-  df = df[df["Stock_Sistema"] > 0]
-  df = df.drop_duplicates(subset=["CodigoLimpio"])
-  return df
-
-def cargar_ubicaciones():
-  try:
-    response = supabase.table("ubicaciones").select("codigo_limpio, ubicacion, cantidad, fecha").gt("cantidad", 0).limit(10000).execute()
-    if response.data:
-      df = pd.DataFrame(response.data)
-      df = df.rename(columns={"codigo_limpio": "CodigoLimpio", "ubicacion": "Ubicacion", "cantidad": "Cantidad", "fecha": "Fecha"})
-      return df
-    return pd.DataFrame(columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"])
-  except Exception as e:
-    st.error(f"🚨 Error al leer la tabla 'ubicaciones': {e}")
-    return pd.DataFrame(columns=["CodigoLimpio", "Ubicacion", "Cantidad", "Fecha"])
-
-def vaciar_estante_completo(ubicacion):
-  ub_limpia = ubicacion.upper().strip()
-  if ub_limpia:
-    try:
-      supabase.table("ubicaciones").delete().eq("ubicacion", ub_limpia).execute()
+        img = Image.open(ruta_imagen).convert("RGBA")
+        r, g, b, alpha = img.split()
+        rgb_inverted = ImageOps.invert(Image.merge("RGB", (r, g, b)))
+        r_inv, g_inv, b_inv = rgb_inverted.split()
+        img_inv = Image.merge("RGBA", (r_inv, g_inv, b_inv, alpha))
+        
+        buf = io.BytesIO()
+        img_inv.save(buf, format="PNG")
+        b64_inv = base64.b64encode(buf.getvalue()).decode()
+        
+        css = f"""
+        <style>
+        .logo-light-container img {{ display: block; width: {width}px; }}
+        .logo-dark-container img {{ display: none; width: {width}px; }}
+        .logo-wrapper {{
+            background: rgba(255, 255, 255, 0.9);
+            padding: 12px;
+            border-radius: 12px;
+            display: inline-block;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            margin-bottom: 15px;
+        }}
+        @media (prefers-color-scheme: dark) {{
+            .logo-light-container img {{ display: none; }}
+            .logo-dark-container img {{ display: block; }}
+            .logo-wrapper {{
+                background: rgba(255, 255, 255, 0.95);
+            }}
+        }}
+        </style>
+        <div class="logo-wrapper">
+            <div class="logo-light-container">
+                <img src="data:image/png;base64,{b64_orig}">
+            </div>
+            <div class="logo-dark-container">
+                <img src="data:image/png;base64,{b64_inv}">
+            </div>
+        </div>
+        """
+        st.markdown(css, unsafe_allow_html=True)
     except Exception as e:
-      st.error(f"🚨 Error al vaciar estante: {e}")
-
-def guardar_ubicacion(codigo, nueva_ubicacion, modo_reemplazar=False, productos_reemplazados_set=None):
-  codigo_limpio = limpiar_codigo(codigo)
-  nueva_ubicacion = nueva_ubicacion.upper().strip()
-
-  if not codigo_limpio or not nueva_ubicacion:
-    return 0
-
-  es_primer_escaneo_reemplazo = False
-  if modo_reemplazar and productos_reemplazados_set is not None:
-    if codigo_limpio not in productos_reemplazados_set:
-      es_primer_escaneo_reemplazo = True
-      productos_reemplazados_set.add(codigo_limpio)
-
-  fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-  try:
-    if es_primer_escaneo_reemplazo:
-      supabase.table("ubicaciones").delete().eq("codigo_limpio", codigo_limpio).execute()
-      supabase.table("ubicaciones").insert({
-          "codigo_limpio": codigo_limpio,
-          "ubicacion": nueva_ubicacion,
-          "cantidad": 1,
-          "fecha": fecha_actual
-      }).execute()
-      cant_actual = 1
-    else:
-      res = supabase.table("ubicaciones").select("cantidad").eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
-      if res.data:
-        cant_actual = res.data[0]["cantidad"] + 1
-        supabase.table("ubicaciones").update({
-            "cantidad": cant_actual,
-            "fecha": fecha_actual
-        }).eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
-      else:
-        cant_actual = 1
-        supabase.table("ubicaciones").insert({
-            "codigo_limpio": codigo_limpio,
-            "ubicacion": nueva_ubicacion,
-            "cantidad": 1,
-            "fecha": fecha_actual
-        }).execute()
-    return cant_actual
-  except Exception as e:
-    st.error(f"🚨 Error al guardar ubicación: {e}")
-    return 0
-
-def obtener_resumen_producto(codigo_limpio, df_ub):
-  match_ub = df_ub[df_ub["CodigoLimpio"] == codigo_limpio]
-  if match_ub.empty:
-    return "⚠️ Sin asignar", 0
-
-  detalles = [f"{row['Ubicacion']} ({row['Cantidad']} pza{'s' if row['Cantidad'] > 1 else ''})" for _, row in match_ub.iterrows()]
-  texto_ub = ", ".join(detalles)
-  total_piezas = match_ub["Cantidad"].sum()
-  return texto_ub, total_piezas
-
-try:
-  df_inv = cargar_inventario()
-  datos_cargados = True
-except Exception as e:
-  datos_cargados = False
-  st.error(f"Error al cargar el archivo CSV: {e}")
+        pass
 
 # ==========================================
-# BARRA LATERAL (CONTROLES GLOBALES)
+# ESTILO VISUAL "SINAPSIS" (TRON / CYBERPUNK)
+# ==========================================
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Inter:wght@300;400;500;600&display=swap');
+
+    html, body, [class*="st"] {
+        font-family: 'Inter', sans-serif !important;
+    }
+
+    [data-testid="stIconMaterial"] {
+        font-family: 'Material Symbols Rounded' !important;
+    }
+
+    h1, h2, h3, .stHeader {
+        font-family: 'Orbitron', sans-serif !important;
+        letter-spacing: 1px;
+    }
+
+    [data-testid="stAppViewContainer"] {
+        color: var(--text-color);
+    }
+
+    header [data-testid="stHeader"] span, 
+    header [data-testid="collapsedControl"] span,
+    section[data-testid="stSidebar"] button[kind="header"] span {
+        display: none !important;
+    }
+
+    .stAlert, div[data-testid="stExpander"] {
+        border-radius: 12px;
+        border: 1px solid rgba(57, 255, 136, 0.3);
+    }
+
+    .kpi-card {
+        background: linear-gradient(135deg, rgba(0, 217, 245, 0.03) 0%, rgba(57, 255, 136, 0.05) 100%);
+        padding: 18px;
+        border-radius: 12px;
+        border-left: 5px solid #39FF88;
+        border-top: 1px solid rgba(57, 255, 136, 0.15);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+        margin-bottom: 10px;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    
+    .kpi-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 25px rgba(57, 255, 136, 0.2);
+    }
+
+    .kpi-card h4 {
+        color: #39FF88;
+        font-weight: 600;
+        font-family: 'Orbitron', sans-serif !important;
+    }
+
+    .login-title {
+        font-family: 'Orbitron', sans-serif !important;
+        font-size: 2rem !important;
+        font-weight: 700;
+        color: #FFFFFF;
+        margin-bottom: 5px;
+    }
+
+    .stButton button[kind="primary"], div.stButton > button {
+        border-radius: 8px;
+        font-weight: 500;
+        transition: all 0.3s ease;
+    }
+
+    div.stButton > button:hover {
+        border-color: #39FF88;
+        box-shadow: 0 0 12px rgba(57, 255, 136, 0.4);
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# LOGIN CON VALIDACIÓN DE ROL
+# ==========================================
+if "autenticado" not in st.session_state: 
+    st.session_state.autenticado = False
+if "es_admin" not in st.session_state:
+    st.session_state.es_admin = False
+if "felicitacion_mostrada" not in st.session_state:
+    st.session_state.felicitacion_mostrada = False
+
+if not st.session_state.autenticado:
+    col_a, col_b, col_c = st.columns([1, 2, 1])
+    with col_b:
+        render_logo("logo_adidas.png", 160)
+        
+        st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
+        st.caption("v3.4 (Neural Core) | Desarrollado por Risal Tech")
+        
+        with st.form("login_form"):
+            u = st.text_input("Usuario")
+            p = st.text_input("Contraseña", type="password")
+            if st.form_submit_button("Iniciar Sesión"):
+                res = supabase.table("usuarios").select("*").eq("username", u.strip()).eq("password", p.strip()).execute()
+                if res.data:
+                    st.session_state.autenticado = True
+                    st.session_state.usuario_actual = u.strip()
+                    usuario_info = res.data[0]
+                    st.session_state.usuario_info = usuario_info
+                    
+                    rol = usuario_info.get("rol", "").lower() if "rol" in usuario_info else ""
+                    if rol == "admin" or "admin" in u.strip().lower():
+                        st.session_state.es_admin = True
+                    else:
+                        st.session_state.es_admin = False
+                        
+                    st.rerun()
+                else: 
+                    st.error("Credenciales incorrectas.")
+    st.stop()
+
+# ==========================================
+# MENÚ LATERAL
 # ==========================================
 with st.sidebar:
-  st.markdown(f"### 👤 Usuario: {st.session_state['usuario']}")
-  st.markdown(f"**Rol:** {st.session_state['rol'].upper()}")
-  
-  if st.button("🚪 Cerrar Sesión", use_container_width=True):
-    st.session_state["autenticado"] = False
-    st.session_state["usuario"] = ""
-    st.session_state["rol"] = ""
-    st.rerun()
-
-  st.markdown("---")
-  st.markdown("### ⚙️ Opciones del Sistema")
-  if st.button("🔄 Recargar Inventario CSV", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
-
-if os.path.exists("Adidas-logo.png"):
-  img_b64 = base64.b64encode(open("Adidas-logo.png", "rb").read()).decode()
-  st.markdown(
-      f"""
-    <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 20px;">
-        <img src="data:image/png;base64,{img_b64}" style="width: 110px; height: auto;">
-        <h1 style="color: #1E3A8A; font-weight: 900; margin: 0; font-size: 42px; line-height: 1;">Gestión de Bodega</h1>
-    </div>
-    """,
-      unsafe_allow_html=True,
-  )
-else:
-  st.markdown('<h1 style="color: #1E3A8A; font-weight: 900; margin-bottom: 20px;">Gestión de Bodega</h1>', unsafe_allow_html=True)
-
-# ==========================================
-# CONTROL DE PESTAÑAS SEGÚN EL ROL
-# ==========================================
-if st.session_state["rol"] == "asesor":
-  tab1, tab2 = st.tabs(["🔍 Escáner Rápido", "🔎 Búsqueda Manual / Ubicación"])
-else:
-  tab1, tab2, tab3, tab4 = st.tabs(["🔍 Escáner Rápido", "🔎 Búsqueda Manual / Ubicación", "📍 Asignar Ubicaciones", "🛒 Carga de Ventas y Resurtido"])
-
-# ==========================================
-# PESTAÑA 1: ESCÁNER EN VIVO (VERSIÓN LIMPIA PARA PISTOLA LÁSER)
-# ==========================================
-with tab1:
-  st.markdown("### Escáner Rápido por Código de Barras")
-  st.info("💡 **Instrucción:** Haz clic en el recuadro blanco de abajo y usa tu pistola lectora, o ingresa el código manualmente con el teclado.")
-
-  if "ultimo_codigo" not in st.session_state:
-    st.session_state["ultimo_codigo"] = ""
-
-  def procesar_escaneo_consulta():
-    codigo_leido = limpiar_codigo(st.session_state["barcode_input"])
-    st.session_state["ultimo_codigo"] = codigo_leido
-    st.session_state["barcode_input"] = ""
-    registrar_busqueda(st.session_state["usuario"], codigo_leido)
-
-  st.text_input(
-      "Ingresa el código manualmente o usa tu pistola lectora:",
-      key="barcode_input",
-      on_change=procesar_escaneo_consulta,
-  )
-
-  codigo_buscado = st.session_state["ultimo_codigo"]
-
-  if codigo_buscado and datos_cargados:
-    resultado = df_inv[df_inv["CodigoLimpio"] == codigo_buscado]
-
-    if not resultado.empty:
-      prod = resultado.iloc[0]
-      df_ub = cargar_ubicaciones()
-
-      ubicacion_texto, total_pzas = obtener_resumen_producto(codigo_buscado, df_ub)
-      stock_sis = prod["Stock_Sistema"]
-      diferencia = total_pzas - stock_sis
-
-      st.success(f"¡Producto Encontrado! (Código: {codigo_buscado})")
-
-      if st.session_state["rol"] == "asesor":
-        col_sis = st.columns(1)[0]
-        with col_sis:
-          st.metric(label="💻 System", value=f"{stock_sis} pza(s)")
-        st.warning(f"📍 **UBICACIONES EN BODEGA:** {ubicacion_texto}")
-      else:
-        col_sis, col_tot, col_dif = st.columns(3)
-        with col_sis:
-          st.metric(label="💻 SISTEMA (CSV)", value=f"{stock_sis} pza(s)")
-        with col_tot:
-          st.metric(label="📦 BODEGA (FÍSICO)", value=f"{total_pzas} pza(s)")
-        with col_dif:
-          st.metric(label="⚠️ DIFERENCIA", value=f"{diferencia} pza(s)")
-        st.warning(f"📍 **UBICACIONES EN BODEGA:** {ubicacion_texto}")
-
-      st.divider()
-
-      col1, col2 = st.columns(2)
-      with col1:
-        cat_val = prod.get('Nivel2', '-')
-        if st.session_state["rol"] == "asesor":
-          cat_val = str(cat_val)[:12]
-        st.write(f"**Categoría:** {cat_val}")
-        st.write(f"**Tipo:** {prod.get('Nivel1', '-')}")
-        st.write(f"**Línea:** {prod.get('Nivel3', '-')}")
-        st.write(f"**Talla:** {prod.get('Talla', '-')}")
-      with col2:
-        st.write(f"**Público:** {prod.get('Nivel4', '-')}")
-        st.write(f"**Referencia:** {prod.get('Referencia', '-')}")
-
-      desc_mostrar = prod.get('Descripcion', '-')
-      if st.session_state["rol"] == "asesor":
-        desc_mostrar = str(desc_mostrar)[:15]
-
-      st.info(f"**Descripción:** {desc_mostrar}")
-    else:
-      df_ub = cargar_ubicaciones()
-      ubicacion_texto, total_pzas = obtener_resumen_producto(codigo_buscado, df_ub)
-      st.warning(f"⚠️ El código **{codigo_buscado}** no está en el catálogo CSV, pero tiene registrada la ubicación: **{ubicacion_texto}**")
-
-# ==========================================
-# PESTAÑA 2: BÚSQUEDA MANUAL Y POR ESTANTE
-# ==========================================
-with tab2:
-  st.markdown("### Búsqueda de Productos y Estantes")
-  opcion_busqueda = st.radio("Selecciona el tipo de búsqueda:", ["🔤 Por Nombre / Descripción / Referencia", "👟 Por Talla Específica", "🏢 Por Estante / Ubicación"], horizontal=True)
-  ver_sin_stock = st.checkbox("Mostrar también registros en ceros (0 en sistema y 0 en bodega)", value=False)
-
-  if opcion_busqueda == "🔤 Por Nombre / Descripción / Referencia":
-    busqueda_texto = st.text_input("Escribe el nombre, referencia, palabra clave o código:").strip().lower()
-    if busqueda_texto and datos_cargados:
-      registrar_busqueda(st.session_state["usuario"], busqueda_texto)
-# Filtro ampliado para buscar en todos los niveles del ERP
-      mask = (
-          df_inv["Descripcion"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv["Referencia"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv.get("Nivel1", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv.get("Nivel2", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv.get("Nivel3", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv.get("Nivel4", pd.Series("")).astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv["CodigoLimpio"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
-          | df_inv["Talla"].astype(str).str.lower().str.contains(busqueda_texto, na=False)
-      )
-      resultados_df = df_inv[mask].copy()
-      if not resultados_df.empty:
-        df_ub = cargar_ubicaciones()
-        resumenes = [{"CodigoLimpio": cod, "Ubicacion": obtener_resumen_producto(cod, df_ub)[0], "TotalPiezas": obtener_resumen_producto(cod, df_ub)[1]} for cod in resultados_df["CodigoLimpio"]]
-        merged = pd.merge(resultados_df, pd.DataFrame(resumenes), on="CodigoLimpio", how="left")
-        merged["Stock_Sistema"] = merged["Stock_Sistema"].fillna(0).astype(int)
-        merged["TotalPiezas"] = merged["TotalPiezas"].fillna(0).astype(int)
-        merged["Ubicacion"] = merged["Ubicacion"].fillna("⚠️ Sin asignar")
-        merged["Diferencia"] = merged["TotalPiezas"] - merged["Stock_Sistema"]
-        if not ver_sin_stock:
-          merged = merged[(merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)]
-        if not merged.empty:
-          st.write(f"Se encontraron **{len(merged)}** registro(s):")
-          st.dataframe(merged[["CodigoLimpio", "Descripcion", "Referencia", "Talla", "Nivel2", "Stock_Sistema", "TotalPiezas", "Ubicacion"]], use_container_width=True, hide_index=True)
-        else:
-          st.warning("Todas las existencias están en ceros.")
-      else:
-        st.warning("No se encontraron coincidencias.")
-
-  elif opcion_busqueda == "👟 Por Talla Específica":
-    if datos_cargados:
-      tallas_disponibles = sorted([t for t in df_inv["Talla"].unique() if t and t != "N/A"])
-      talla_seleccionada = st.selectbox("Selecciona la talla:", ["-- Selecciona una talla --"] + tallas_disponibles)
-      if talla_seleccionada and talla_seleccionada != "-- Selecciona una talla --":
-        resultados_df = df_inv[df_inv["Talla"].astype(str).str.upper() == talla_seleccionada.upper()].copy()
-        if not resultados_df.empty:
-          df_ub = cargar_ubicaciones()
-          resumenes = [{"CodigoLimpio": cod, "Ubicacion": obtener_resumen_producto(cod, df_ub)[0], "TotalPiezas": obtener_resumen_producto(cod, df_ub)[1]} for cod in resultados_df["CodigoLimpio"]]
-          merged = pd.merge(resultados_df, pd.DataFrame(resumenes), on="CodigoLimpio", how="left")
-          merged["Stock_Sistema"] = merged["Stock_Sistema"].fillna(0).astype(int)
-          merged["TotalPiezas"] = merged["TotalPiezas"].fillna(0).astype(int)
-          merged["Ubicacion"] = merged["Ubicacion"].fillna("⚠️ Sin asignar")
-          if not ver_sin_stock:
-            merged = merged[(merged["Stock_Sistema"] > 0) | (merged["TotalPiezas"] > 0)]
-          if not merged.empty:
-            st.dataframe(merged[["CodigoLimpio", "Descripcion", "Referencia", "Talla", "Stock_Sistema", "TotalPiezas", "Ubicacion"]], use_container_width=True, hide_index=True)
-
-  else:
-    busqueda_ub = st.text_input("Escribe el estante (Ejemplo: H3A):").strip().upper()
-    if busqueda_ub:
-      df_ub = cargar_ubicaciones()
-      if not df_ub.empty:
-        df_ub_filtrado = df_ub[df_ub["Ubicacion"].astype(str).str.upper().str.contains(busqueda_ub, na=False)].copy()
-        if not df_ub_filtrado.empty:
-          merged_loc = pd.merge(df_ub_filtrado, df_inv, on="CodigoLimpio", how="left").fillna("-")
-          st.dataframe(merged_loc[["CodigoLimpio", "Descripcion", "Referencia", "Talla", "Cantidad", "Ubicacion"]], use_container_width=True, hide_index=True)
-        else:
-          st.warning(f"No hay productos en '{busqueda_ub}'.")
-
-# ==========================================
-# PESTAÑA 3: ASIGNAR UBICACIONES (ADMIN)
-# ==========================================
-if st.session_state["rol"] == "admin":
-  with tab3:
-    st.markdown("### Asignación Rápida por Lote")
-    if "ultima_asignacion" not in st.session_state: st.session_state["ultima_asignacion"] = ""
-    if "error_asignacion" not in st.session_state: st.session_state["error_asignacion"] = ""
-    if "reemplazados_set" not in st.session_state: st.session_state["reemplazados_set"] = set()
-    if "contador_sesion_lote" not in st.session_state: st.session_state["contador_sesion_lote"] = 0
-
-    modo = st.radio("Modo:", ["➕ Sumar", "🔄 Reemplazar", "🧹 Inventario Limpio de Estante"])
-    es_reem = "🔄 Reemplazar" in modo
-    es_inv = "🧹" in modo
-
-    c1, c2 = st.columns([3, 1])
-    with c1: ub_in = st.text_input("1. Ubicación:", key="ub_fija").strip()
-    with c2:
-      st.write(" ")
-      st.write(" ")
-      if st.button("🗑️ Vaciar", use_container_width=True) and ub_in:
-        vaciar_estante_completo(ub_in)
-        st.session_state["reemplazados_set"] = set()
-        st.session_state["contador_sesion_lote"] = 0
-        st.success(f"Estante {ub_in} vaciado.")
+    render_logo("logo_adidas.png", 120)
+    st.markdown("### ⚡ Sinapsis")
+    st.caption("🚀 **Versión:** 3.4 (Neural Core)")
+    st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
+    
+    if st.button("🚪 Cerrar Sesión"):
+        st.session_state.autenticado = False
+        st.session_state.es_admin = False
+        st.session_state.felicitacion_mostrada = False
         st.rerun()
-
-    def procesar_escaneo_ubicacion():
-      raw = st.session_state["barcode_ub_input"]
-      cods = extraer_codigos_multiples(raw)
-      ub = st.text_input("1. Ubicación:", key="ub_fija").strip() if "ub_fija" in st.session_state else ""
-      if not ub:
-        st.session_state["error_asignacion"] = "⚠️ Escribe la ubicación."
-      elif cods:
-        for c in cods:
-          guardar_ubicacion(c, ub, modo_reemplazar=es_reem, productos_reemplazados_set=st.session_state["reemplazados_set"])
-          st.session_state["contador_sesion_lote"] += 1
-        st.session_state["ultima_asignacion"] = f"✅ Registrado en {ub.upper()}"
-        st.session_state["error_asignacion"] = ""
-      st.session_state["barcode_ub_input"] = ""
-
-    st.text_input("2. Escanea productos:", key="barcode_ub_input", on_change=procesar_escaneo_ubicacion)
-    if st.session_state["ultima_asignacion"]: st.success(st.session_state["ultima_asignacion"])
+    st.markdown("---")
 
 # ==========================================
-# PESTAÑA 4: VENTAS (ADMIN)
+# FUNCIONES DE IA
 # ==========================================
-if st.session_state["rol"] == "admin":
-  with tab4:
-    st.markdown("### Cargar Ventas y Resurtido")
-    archivo_ventas = st.file_uploader("Sube reporte:", type=["csv", "xlsx"])
-    if archivo_ventas:
-      df_v = pd.read_csv(archivo_ventas) if archivo_ventas.name.endswith(".csv") else pd.read_excel(archivo_ventas)
-      st.dataframe(df_v.head(3), hide_index=True)
-      col_c1, col_c2 = st.columns(2)
-      col_code = col_c1.selectbox("Columna Código:", df_v.columns)
-      col_cant = col_c2.selectbox("Columna Cantidad:", df_v.columns)
-      if st.button("🚀 Procesar"):
-        st.success("Ventas procesadas.")
+def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
+    try:
+        ref_limpia = str(referencia).split('-')[0].strip()
+        res_db = supabase.table("tips_ia").select("tips").eq("referencia", ref_limpia).execute().data
+        
+        if res_db and len(res_db) > 0 and res_db[0].get("tips"):
+            return res_db[0].get("tips"), "⚡ (Obtenido del núcleo de datos)"
+        
+        model = genai.GenerativeModel('gemini-3.7-flash')
+        prompt_maestro = generar_prompt_maestro(nombre_producto, ref_limpia, categoria)
+        response = model.generate_content(prompt_maestro)
+        nuevo_texto = response.text
+        
+        supabase.table("tips_ia").upsert({"referencia": ref_limpia, "tips": nuevo_texto}).execute()
+        return nuevo_texto, "⚡ (Generado por IA con Red Sináptica)"
+    except Exception as e:
+        return f"⚠️ Error al procesar: {e}", "Error"
+
+# ==========================================
+# INTERFAZ PRINCIPAL CON PESTAÑAS
+# ==========================================
+nombre_usuario_actual = st.session_state.usuario_info.get('nombre_completo', '')
+if not nombre_usuario_actual or nombre_usuario_actual == 'None':
+    nombre_usuario_actual = st.session_state.usuario_actual
+
+st.title(f"⚡ ¡Bienvenid@, {nombre_usuario_actual}!")
+
+if st.session_state.es_admin:
+    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
+    tab_perf, tab_busqueda, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
+else:
+    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual"])
+    tab_perf, tab_busqueda = tabs[0], tabs[1]
+    tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None
+
+# ------------------------------------------
+# 4. PESTAÑA: ADMIN & CARGA ERP (SÓLO ADMIN)
+# ------------------------------------------
+if tab_admin_erp is not None:
+    with tab_admin_erp:
+        st.subheader("📥 Cargar Reporte de Ventas Diario del ERP (CSV)")
+        archivo_sales = st.file_uploader("Subir CSV de Extracto de Ventas", type=["csv"], key="sales_csv")
+        
+        if archivo_sales is not None:
+            try:
+                df_raw = pd.read_csv(archivo_sales, encoding='latin1')
+                
+                df_raw['Neto_D_num'] = pd.to_numeric(df_raw['Neto_D'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['Neto_T_num'] = pd.to_numeric(df_raw['Neto_T'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['UPT_D_num'] = pd.to_numeric(df_raw['textbox28'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['ATV_D_num'] = pd.to_numeric(df_raw['textbox19'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['ASP_D_num'] = pd.to_numeric(df_raw['textbox2'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                
+                df_raw['UPT_T_num'] = pd.to_numeric(df_raw['textbox31'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['ATV_T_num'] = pd.to_numeric(df_raw['textbox5'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['ASP_T_num'] = pd.to_numeric(df_raw['textbox20'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                
+                df_raw.to_csv("ventas_diarias_temp.csv", index=False)
+                st.session_state.felicitacion_mostrada = False
+                
+                st.success("✅ Reporte de ventas procesado por la red correctamente.")
+                st.info("👉 Ahora puedes ir a la pestaña '📊 Dashboard' para ver los resultados actualizados.")
+            except Exception as ex:
+                st.error(f"Error al procesar el CSV: {ex}")
+        
+        # ==========================================
+        # SECCIÓN: CARGA DE CATÁLOGO A SUPABASE CON TRADUCTOR
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
+        st.info("Sube aquí el archivo CSV de tu ERP (RPInv_Extracto_Referencia) para sincronizar la red en Supabase.")
+
+        archivo_catalogo = st.file_uploader("Subir CSV de Catálogo", type=["csv"], key="cat_csv")
+
+        if archivo_catalogo is not None:
+            if st.button("⚡ Sincronizar Catálogo en la Nube"):
+                try:
+                    with st.spinner("Estableciendo sinapsis y sincronizando el núcleo... Esto puede tomar unos segundos."):
+                        df_cat = pd.read_csv(archivo_catalogo, encoding='latin1', skiprows=5, dtype=str)
+                        
+                        mapeo_columnas = {
+                            'CodigoAlterno': 'codigo_limpio',
+                            'Referencia': 'referencia',
+                            'Descripcion': 'descripcion',
+                            'Cantidad': 'stock_sistema',
+                            'Nivel1': 'nivel1',
+                            'Nivel2': 'nivel2',
+                            'Nivel3': 'nivel3',
+                            'Nivel4': 'nivel4'
+                        }
+                        
+                        df_cat = df_cat.rename(columns=mapeo_columnas)
+                        
+                        if 'referencia' in df_cat.columns:
+                            df_cat['talla'] = df_cat['referencia'].apply(lambda x: str(x).split('-', 1)[1] if '-' in str(x) else '')
+                        
+                        columnas_esperadas = ['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'nivel2', 'nivel3', 'nivel4', 'stock_sistema']
+                        columnas_existentes = [col for col in columnas_esperadas if col in df_cat.columns]
+                        df_cat = df_cat[columnas_existentes]
+                        
+                        if 'stock_sistema' in df_cat.columns:
+                            df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0).astype(int)
+                        
+                        if 'codigo_limpio' in df_cat.columns:
+                            df_cat = df_cat.dropna(subset=['codigo_limpio'])
+                        
+                        df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
+                        registros = df_cat.to_dict(orient="records")
+
+                        TAMANO_BLOQUE = 500
+                        total_registros = len(registros)
+                        total_bloques = max(1, -(-total_registros // TAMANO_BLOQUE))
+
+                        barra_progreso = st.progress(0, text=f"Sincronizando 0 de {total_registros} artículos...")
+
+                        for i in range(0, total_registros, TAMANO_BLOQUE):
+                            bloque = registros[i:i + TAMANO_BLOQUE]
+                            supabase.table("catalogo_erp").upsert(bloque).execute()
+
+                            subidos = min(i + TAMANO_BLOQUE, total_registros)
+                            porcentaje = subidos / total_registros
+                            barra_progreso.progress(porcentaje, text=f"Sincronizando {subidos} de {total_registros} artículos...")
+
+                        barra_progreso.empty()
+                        st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {total_registros} artículos.")
+                except Exception as ex:
+                    st.error(f"⚠️ Error al sincronizar: {ex}")
+        
+        st.markdown("---")
+        st.subheader("⚙️ Configuración de Metas por Asesor")
+        
+        res_u = supabase.table("usuarios").select("*").execute().data
+        if res_u:
+            df_u = pd.DataFrame(res_u)
+            for col in ['codigo_erp', 'nombre_completo', 'meta_mensual']:
+                if col not in df_u.columns:
+                    df_u[col] = ""
+                    
+            edited_df = st.data_editor(
+                df_u[['username', 'codigo_erp', 'nombre_completo', 'meta_mensual']],
+                column_config={
+                    "username": st.column_config.TextColumn("Usuario App", disabled=True),
+                    "codigo_erp": st.column_config.TextColumn("Código ERP"),
+                    "nombre_completo": st.column_config.TextColumn("Nombre Completo"),
+                    "meta_mensual": st.column_config.NumberColumn("Meta Mensual ($)", format="$%.2f", step=0.01, min_value=0.0)
+                },
+                use_container_width=True
+            )
+            
+            if st.button("Guardar Cambios de Metas"):
+                for _, row in edited_df.iterrows():
+                    supabase.table("usuarios").update({
+                        "codigo_erp": str(row['codigo_erp']).strip(),
+                        "nombre_completo": str(row['nombre_completo']).strip(),
+                        "meta_mensual": float(row['meta_mensual']) if row['meta_mensual'] else 0.0
+                    }).eq("username", row['username']).execute()
+                st.success("¡Metas guardadas correctamente en la red!")
+                st.rerun()
+
+# ------------------------------------------
+# 1. PESTAÑA: PERFORMANCE & KPIS
+# ------------------------------------------
+with tab_perf:
+    if not os.path.exists("ventas_diarias_temp.csv"):
+        st.header("📊 Tablero de Rendimiento Diario")
+        st.info("ℹ️ No se ha cargado el reporte de ventas del día. El administrador puede subirlo en la pestaña '⚙️ Admin & Carga ERP'.")
+    else:
+        df_v = pd.read_csv("ventas_diarias_temp.csv")
+        res_u = supabase.table("usuarios").select("*").execute().data
+        df_users = pd.DataFrame(res_u) if res_u else pd.DataFrame()
+        
+        if not df_users.empty and "codigo_erp" in df_users.columns:
+            df_v = df_v.merge(df_users[['codigo_erp', 'meta_mensual']], left_on='codigo', right_on='codigo_erp', how='left')
+            df_v['meta_mensual'] = pd.to_numeric(df_v['meta_mensual'], errors='coerce').fillna(0)
+        else:
+            df_v['meta_mensual'] = 0.0
+
+        venta_tienda_neto = df_v['Neto_T_num'].iloc[0] if 'Neto_T_num' in df_v.columns else 0.0
+        meta_tienda_total = df_v['meta_mensual'].sum() if df_v['meta_mensual'].sum() > 0 else 1571112.40
+        alcance_tienda_pct = (venta_tienda_neto / meta_tienda_total) * 100 if meta_tienda_total > 0 else 0
+        falta_tienda = max(0.0, meta_tienda_total - venta_tienda_neto)
+        
+        upt_tienda = df_v['UPT_T_num'].iloc[0] if 'UPT_T_num' in df_v.columns else 0.0
+        atv_tienda = df_v['ATV_T_num'].iloc[0] if 'ATV_T_num' in df_v.columns else 0.0
+        asp_tienda = df_v['ASP_T_num'].iloc[0] if 'ASP_T_num' in df_v.columns else 0.0
+
+        codigo_erp_bd = st.session_state.usuario_info.get('codigo_erp', '')
+        if not codigo_erp_bd or codigo_erp_bd == 'None':
+            codigo_erp_bd = st.session_state.usuario_actual
+            
+        usuario_code = str(codigo_erp_bd).strip().lower()
+        user_row = df_v[df_v['codigo'].astype(str).str.strip().str.lower() == usuario_code]
+        
+        if user_row.empty and not st.session_state.es_admin:
+            st.header("📊 Tablero de Rendimiento Diario")
+            st.warning(f"No se encontraron registros de ventas para el código ERP: '{usuario_code}'.")
+        else:
+            row_asesor = user_row.iloc[0] if not user_row.empty else df_v.iloc[0]
+            
+            nombre_asesor = row_asesor.get('nombre', usuario_code)
+            venta_asesor_neto = row_asesor.get('Neto_D_num', 0.0)
+            meta_asesor = row_asesor.get('meta_mensual', 282800.23)
+            alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
+            falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
+            
+            upt_asesor = row_asesor.get('UPT_D_num', 0.0)
+            atv_asesor = row_asesor.get('ATV_D_num', 0.0)
+            asp_asesor = row_asesor.get('ASP_D_num', 0.0)
+
+            df_ranked = df_v.sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
+            if not df_ranked.empty:
+                primer_lugar_nombre = df_ranked.iloc[0]['nombre']
+                primer_lugar_venta = df_ranked.iloc[0]['Neto_D_num']
+                
+                if "admin" not in st.session_state.usuario_actual.lower():
+                    if str(nombre_asesor) == str(primer_lugar_nombre):
+                        st.success(f"🏆 ¡Felicidades, {nombre_asesor}! Lideras la red de ventas, continúa así.")
+                        if not st.session_state.felicitacion_mostrada:
+                            st.balloons()
+                            st.session_state.felicitacion_mostrada = True
+                    else:
+                        diferencia = primer_lugar_venta - venta_asesor_neto
+                        st.info(f"⚡ ¡Excelente esfuerzo, {nombre_asesor}! Estás a **${diferencia:,.2f}** de conectar con el primer lugar ({primer_lugar_nombre}).")
+            
+            st.header("📊 Tablero de Rendimiento Diario")
+
+            col_t, col_a = st.columns(2)
+            with col_t:
+                st.subheader("🏬 PERFORMANCE TIENDA")
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <h4>Meta Tienda: ${meta_tienda_total:,.2f}</h4>
+                    <p><b>Venta Acumulada Neta:</b> ${venta_tienda_neto:,.2f}</p>
+                    <p><b>Falta para la Meta:</b> ${falta_tienda:,.2f}</p>
+                    <p><b>Alcance:</b> {alcance_tienda_pct:.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(min(1.0, alcance_tienda_pct / 100))
+
+            with col_a:
+                st.subheader(f"👤 MI PERFORMANCE ({nombre_asesor})")
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <h4>Mi Meta Mensual: ${meta_asesor:,.2f}</h4>
+                    <p><b>Mi Venta Neta:</b> ${venta_asesor_neto:,.2f}</p>
+                    <p><b>Falta para Mi Meta:</b> ${falta_asesor:,.2f}</p>
+                    <p><b>Mi Alcance:</b> {alcance_asesor_pct:.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(min(1.0, alcance_asesor_pct / 100))
+
+            st.markdown("---")
+            st.subheader("🎯 Comparativa de KPIs Operativos")
+            
+            kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
+            with kpi_c1:
+                diff_upt = upt_asesor - upt_tienda
+                st.metric(
+                    label="UPT (Unidades x Ticket)", 
+                    value=f"{upt_asesor:.2f}", 
+                    delta=f"{diff_upt:+.2f} vs Tienda ({upt_tienda:.2f})",
+                    delta_color="normal"
+                )
+            with kpi_c2:
+                diff_atv = atv_asesor - atv_tienda
+                signo_atv = "+" if diff_atv >= 0 else "-"
+                st.metric(
+                    label="ATV (Ticket Promedio)", 
+                    value=f"${atv_asesor:,.2f}", 
+                    delta=f"{signo_atv}\\${abs(diff_atv):,.2f} vs Tienda (\\${atv_tienda:,.2f})",
+                    delta_color="normal"
+                )
+            with kpi_c3:
+                diff_asp = asp_asesor - asp_tienda
+                signo_asp = "+" if diff_asp >= 0 else "-"
+                st.metric(
+                    label="ASP (Precio Promedio)", 
+                    value=f"${asp_asesor:,.2f}", 
+                    delta=f"{signo_asp}\\${abs(diff_asp):,.2f} vs Tienda (\\${asp_tienda:,.2f})",
+                    delta_color="normal"
+                )
+
+            st.markdown("---")
+            st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
+            
+            df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
+            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#39FF88' if str(x) == str(nombre_asesor) else '#00D9F5')
+            
+            bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+                x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
+                color=alt.Color('Color:N', scale=None)
+            )
+            text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
+            
+            st.altair_chart(bars + text, use_container_width=True)
+
+# ------------------------------------------
+# 2. PESTAÑA: BÚSQUEDA MANUAL
+# ------------------------------------------
+with tab_busqueda:
+    col1, col2, col3 = st.columns(3)
+    in_ref = col1.text_input("🔍 Ref/Desc:", key="in_ref")
+    in_talla = col2.text_input("📏 Talla:", key="in_talla")
+    in_ubic = col3.text_input("🏢 Estante/Ubicación:", key="in_ubic")
+
+    if st.session_state.es_admin:
+        solo_disp = st.checkbox("Ocultar stock en 0", value=True)
+    else:
+        solo_disp = True
+        
+    if st.button("Buscar en la Red") or in_ref or in_talla or in_ubic:
+        codigos_en_ubicacion = None
+        if in_ubic:
+            res_ubic_busqueda = supabase.table("ubicaciones").select("codigo_limpio").ilike("ubicacion", f"%{in_ubic.strip()}%").execute()
+            codigos_en_ubicacion = list({item['codigo_limpio'] for item in (res_ubic_busqueda.data or [])})
+            if not codigos_en_ubicacion:
+                st.warning(f"⚠️ No hay artículos escaneados en la ubicación '{in_ubic.strip()}'.")
+
+        query = supabase.table("catalogo_erp").select("*")
+        if solo_disp: query = query.gt("stock_sistema", 0)
+        
+        # AQUÍ ESTÁ EL FILTRO CORREGIDO Y LIMPIO
+        if in_ref: 
+            query = query.or_(
+                f"referencia.ilike.%{in_ref.strip()}%, "
+                f"descripcion.ilike.%{in_ref.strip()}%, "
+                f"nivel1.ilike.%{in_ref.strip()}%, "
+                f"nivel2.ilike.%{in_ref.strip()}%, "
+                f"nivel3.ilike.%{in_ref.strip()}%"
+            )
+            
+        if in_talla: query = query.like("talla", f"{in_talla.strip()}%")
+        if codigos_en_ubicacion is not None:
+            if not codigos_en_ubicacion:
+                codigos_en_ubicacion = ["__sin_resultados__"]
+            query = query.in_("codigo_limpio", codigos_en_ubicacion)
+        
+        res = query.limit(50).execute() 
+        if res.data:
+            df = pd.DataFrame(res.data)
+            codigos_encontrados = df['codigo_limpio'].dropna().astype(str).unique().tolist()
+            if codigos_encontrados:
+                res_ubic = supabase.table("ubicaciones").select("codigo_limpio, ubicacion, cantidad").in_("codigo_limpio", codigos_encontrados).execute()
+                if res_ubic.data:
+                    df_ubic = pd.DataFrame(res_ubic.data)
+                    df_ubic['ubicacion_texto'] = df_ubic['ubicacion'].astype(str) + " (" + df_ubic['cantidad'].astype(str) + " pza)"
+                    df_ubic_agrupado = df_ubic.groupby('codigo_limpio')['ubicacion_texto'].apply(lambda x: ", ".join(x)).reset_index()
+                    df_ubic_agrupado = df_ubic_agrupado.rename(columns={'ubicacion_texto': 'ubicacion'})
+                    df = df.merge(df_ubic_agrupado, on='codigo_limpio', how='left')
+                else:
+                    df['ubicacion'] = None
+            else:
+                df['ubicacion'] = None
+            df['ubicacion'] = df['ubicacion'].fillna("Sin ubicación registrada")
+
+            st.success(f"⚡ Se conectaron {len(df)} artículos en la red.")
+
+            if st.session_state.es_admin:
+                st.dataframe(df[['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'stock_sistema', 'ubicacion']], use_container_width=True)
+            else:
+                st.dataframe(df[['referencia', 'descripcion', 'talla', 'ubicacion']], use_container_width=True)
+            
+            ref_raw = df.iloc[0]['referencia']
+            codigo_detectado = str(ref_raw).split('-')[0].strip()
+            nombre_detectado = df.iloc[0]['descripcion']
+            categoria_detectada = df.iloc[0].get('nivel1', 'General')
+            
+            st.markdown("---")
+            st.markdown("#### ⚡ Asistente Sináptico de Ventas")
+            with st.expander(f"✨ Ver Tips de Venta para {codigo_detectado}", expanded=False):
+                if st.session_state.es_admin:
+                    if st.button("Regenerar argumentos con IA", key="btn_ia_manual_regen"):
+                        supabase.table("tips_ia").delete().eq("referencia", codigo_detectado).execute()
+                    
+                if st.button("Generar argumentos con IA", key="btn_ia_manual"):
+                    with st.spinner("Estableciendo sinapsis cognitiva..."):
+                        tips_venta, origen_dato = obtener_o_generar_storytelling(codigo_detectado, nombre_detectado, categoria_detectada)
+                        st.info(tips_venta)
+                        st.caption(f"⚡ {origen_dato}")
+        else:
+            st.warning("Sin conexiones en la red.")
+
+# ------------------------------------------
+# 3. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
+# ------------------------------------------
+if tab_escaneo is not None:
+    with tab_escaneo:
+        codigo = st.text_input("Escanea o escribe el código de barras:", key="scan")
+        if codigo:
+            prod = supabase.table("catalogo_erp").select("*").eq("codigo_limpio", codigo.strip()).execute().data
+            if prod:
+                p = prod[0]
+                st.success(f"Producto: {p.get('descripcion')} | Ref: {p.get('referencia')} | Stock: {p.get('stock_sistema')}")
+            else:
+                st.warning("Producto no encontrado en el núcleo.")
+
+# ------------------------------------------
+# 5. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
+# ------------------------------------------
+if tab_admin_user is not None:
+    with tab_admin_user:
+        st.subheader("👥 Agregar Usuario")
+        with st.form("nuevo_u"):
+            col_u1, col_u2 = st.columns(2)
+            with col_u1:
+                u_n = st.text_input("Usuario")
+            with col_u2:
+                p_n = st.text_input("Contraseña")
+            if st.form_submit_button("Agregar Usuario"):
+                if u_n and p_n:
+                    try:
+                        supabase.table("usuarios").insert({
+                            "username": u_n.strip(), 
+                            "password": p_n.strip(), 
+                            "rol": "asesor",
+                            "codigo_erp": u_n.strip(),
+                            "nombre_completo": "",
+                            "meta_mensual": 0.0
+                        }).execute()
+                        st.success(f"Usuario {u_n.strip()} agregado correctamente.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al crear usuario: {e}")
+                else:
+                    st.warning("Debes llenar el usuario y la contraseña.")
+                    
+        st.markdown("---")
+        st.subheader("🗑️ Eliminar Usuario")
+        res_usuarios_existentes = supabase.table("usuarios").select("username").execute().data
+        lista_usernames = [row["username"] for row in res_usuarios_existentes] if res_usuarios_existentes else []
+        
+        if lista_usernames:
+            with st.form("form_eliminar_usuario"):
+                usuario_a_borrar = st.selectbox("Selecciona el usuario que deseas eliminar:", options=lista_usernames)
+                btn_borrar = st.form_submit_button("Eliminar Usuario Seleccionado", type="primary")
+                
+                if btn_borrar:
+                    if usuario_a_borrar.lower() == "admin":
+                        st.error("⚠️ Por seguridad, no se puede eliminar al usuario administrador principal.")
+                    else:
+                        try:
+                            supabase.table("usuarios").delete().eq("username", usuario_a_borrar).execute()
+                            st.success(f"🗑️ El usuario '{usuario_a_borrar}' ha sido eliminado de la red.")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Error al eliminar usuario: {ex}")
+        else:
+            st.info("No hay usuarios adicionales registrados.")
+
+        st.markdown("---")
+        st.subheader("🔑 Gestionar Contraseñas y Permisos")
+        st.info("Visualiza y edita las contraseñas o el rol de acceso directamente en esta tabla. No olvides dar clic en 'Guardar Cambios de Usuarios'.")
+        
+        res_u_list = supabase.table("usuarios").select("username, password, rol").execute().data
+        if res_u_list:
+            df_u_pass = pd.DataFrame(res_u_list)
+            
+            edited_pass_df = st.data_editor(
+                df_u_pass,
+                column_config={
+                    "username": st.column_config.TextColumn("Usuario App", disabled=True),
+                    "password": st.column_config.TextColumn("Contraseña (Editable)"),
+                    "rol": st.column_config.SelectboxColumn("Rol de Acceso", options=["admin", "asesor"])
+                },
+                use_container_width=True
+            )
+            
+            if st.button("Guardar Cambios de Usuarios"):
+                with st.spinner("Actualizando contraseñas y permisos en el núcleo..."):
+                    try:
+                        for _, row in edited_pass_df.iterrows():
+                            supabase.table("usuarios").update({
+                                "password": str(row['password']).strip(),
+                                "rol": str(row['rol']).strip()
+                            }).eq("username", row['username']).execute()
+                        st.success("¡Contraseñas y accesos actualizados correctamente!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ocurrió un error al guardar: {e}")

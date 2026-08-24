@@ -1,13 +1,31 @@
 from datetime import datetime
 import os
+import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 import pandas as pd
 from supabase import create_client
+from dotenv import load_dotenv
 
 # --- CONFIGURACIÓN DE SUPABASE ---
-URL = "https://wisvrvrfthxzjmsrkovi.supabase.co"
-KEY = "sb_publishable__MZ6RW9xRxbzBoaSnUx7_A_HVaNUx8s"
+# Las claves ya NO viven aquí en el código. Se leen desde un archivo .env
+# que se queda solo en tu computadora y nunca se sube a GitHub.
+load_dotenv()
+
+URL = os.getenv("SUPABASE_URL")
+KEY = os.getenv("SUPABASE_KEY")
+
+if not URL or not KEY:
+    # Si falta el archivo .env o las claves dentro de él, avisamos con un
+    # mensaje claro en vez de que la app truene sin explicación.
+    messagebox.showerror(
+        "Falta configuración",
+        "No se encontraron SUPABASE_URL y/o SUPABASE_KEY.\n\n"
+        "Revisa que exista un archivo .env en esta misma carpeta con:\n"
+        "SUPABASE_URL=tu_url\nSUPABASE_KEY=tu_llave"
+    )
+    sys.exit(1)
+
 supabase = create_client(URL, KEY)
 
 ARCHIVO_CATALOGO = "RPInv_Extracto_Referencia.csv"
