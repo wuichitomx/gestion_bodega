@@ -8,4 +8,4 @@ __pycache__/
 # Archivo temporal de ventas del día (se genera al usar la app, no es código)
 ventas_diarias_temp.csv
 .venv/
-streamlit/secrets.toml 
+.streamlit/secrets.toml 
