@@ -36,12 +36,22 @@ def render_logo(ruta_imagen, width=160):
             img_data = f.read()
         b64_orig = base64.b64encode(img_data).decode()
         
+        img = Image.open(ruta_imagen).convert("RGBA")
+        r, g, b, alpha = img.split()
+        rgb_inverted = ImageOps.invert(Image.merge("RGB", (r, g, b)))
+        r_inv, g_inv, b_inv = rgb_inverted.split()
+        img_inv = Image.merge("RGBA", (r_inv, g_inv, b_inv, alpha))
+        
+        buf = io.BytesIO()
+        img_inv.save(buf, format="PNG")
+        b64_inv = base64.b64encode(buf.getvalue()).decode()
+        
         css = f"""
         <style>
         .logo-light-container img {{ display: block; width: {width}px; }}
         .logo-dark-container img {{ display: none; width: {width}px; }}
         .logo-wrapper {{
-            background: rgba(255, 255, 255, 0.95);
+            background: rgba(255, 255, 255, 0.9);
             padding: 12px;
             border-radius: 12px;
             display: inline-block;
@@ -49,14 +59,19 @@ def render_logo(ruta_imagen, width=160):
             margin-bottom: 15px;
         }}
         @media (prefers-color-scheme: dark) {{
+            .logo-light-container img {{ display: none; }}
+            .logo-dark-container img {{ display: block; }}
             .logo-wrapper {{
-                background: rgba(255, 255, 255, 0.95) !important;
+                background: rgba(255, 255, 255, 0.95);
             }}
         }}
         </style>
         <div class="logo-wrapper">
             <div class="logo-light-container">
                 <img src="data:image/png;base64,{b64_orig}">
+            </div>
+            <div class="logo-dark-container">
+                <img src="data:image/png;base64,{b64_inv}">
             </div>
         </div>
         """
@@ -188,7 +203,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.5 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.4 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -267,7 +282,7 @@ if tab_admin_erp is not None:
                 st.error(f"Error al procesar el CSV: {ex}")
         
         # ==========================================
-        # SECCIÓN: CARGA DE CATÁLOGO A SUPABASE
+        # SECCIÓN: CARGA DE CATÁLOGO A SUPABASE CON TRADUCTOR
         # ==========================================
         st.markdown("---")
         st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
@@ -361,7 +376,7 @@ if tab_admin_erp is not None:
                 st.rerun()
 
 # ------------------------------------------
-# 1. PESTAÑA: PERFORMANCE & KPIS (ACTUALIZADA V3.5)
+# 1. PESTAÑA: PERFORMANCE & KPIS
 # ------------------------------------------
 with tab_perf:
     if not os.path.exists("ventas_diarias_temp.csv"):
@@ -387,95 +402,35 @@ with tab_perf:
         atv_tienda = df_v['ATV_T_num'].iloc[0] if 'ATV_T_num' in df_v.columns else 0.0
         asp_tienda = df_v['ASP_T_num'].iloc[0] if 'ASP_T_num' in df_v.columns else 0.0
 
-        # ==========================================
-        # VISTA EXCLUSIVA PARA EL ADMINISTRADOR
-        # ==========================================
-        if st.session_state.es_admin:
-            st.header("📊 Tablero Gerencial Diario")
+        codigo_erp_bd = st.session_state.usuario_info.get('codigo_erp', '')
+        if not codigo_erp_bd or codigo_erp_bd == 'None':
+            codigo_erp_bd = st.session_state.usuario_actual
             
-            # 1. Performance General de Tienda
-            st.subheader("🏬 PERFORMANCE TIENDA")
-            st.markdown(f"""
-            <div class="kpi-card">
-                <h4>Meta Tienda: ${meta_tienda_total:,.2f}</h4>
-                <p><b>Venta Acumulada Neta:</b> ${venta_tienda_neto:,.2f}</p>
-                <p><b>Falta para la Meta:</b> ${falta_tienda:,.2f}</p>
-                <p><b>Alcance:</b> {alcance_tienda_pct:.1f}%</p>
-            </div>
-            """, unsafe_allow_html=True)
-            st.progress(min(1.0, alcance_tienda_pct / 100))
-            
-            st.markdown("---")
-            st.subheader("📈 Ranking de Ventas Acumuladas por Asesor ($)")
-            
-            df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-            bars = alt.Chart(df_chart).mark_bar(color='#00D9F5', cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-                x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
-                y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)')
-            )
-            text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
-            st.altair_chart(bars + text, use_container_width=True)
-
-            st.markdown("---")
-            st.subheader("🎯 Radiografía Operativa: KPIs por Asesor vs Promedio Tienda")
-            st.caption("🟢 La línea verde punteada indica el promedio general de la tienda.")
-
-            def crear_grafica_kpi(df, campo_y, titulo, promedio_tienda, formato):
-                df_sorted = df.sort_values(campo_y, ascending=False)
-                base = alt.Chart(df_sorted).encode(x=alt.X('nombre:N', sort=None, title=None, axis=alt.Axis(labelAngle=-45)))
-                bar = base.mark_bar(color='#00D9F5', opacity=0.85, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-                    y=alt.Y(f'{campo_y}:Q', title=titulo)
-                )
-                text = bar.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(
-                    text=alt.Text(f'{campo_y}:Q', format=formato)
-                )
-                rule = alt.Chart(pd.DataFrame({campo_y: [promedio_tienda]})).mark_rule(
-                    color='#39FF88', strokeWidth=3, strokeDash=[5, 5]
-                ).encode(y=f'{campo_y}:Q')
-                return (bar + text + rule).properties(height=320, title=f"{titulo}")
-
-            df_kpis = df_v[['nombre', 'UPT_D_num', 'ATV_D_num', 'ASP_D_num']].copy()
-            
-            kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
-            with kpi_col1:
-                st.altair_chart(crear_grafica_kpi(df_kpis, 'UPT_D_num', 'UPT (Unidades x Ticket)', upt_tienda, '.2f'), use_container_width=True)
-            with kpi_col2:
-                st.altair_chart(crear_grafica_kpi(df_kpis, 'ATV_D_num', 'ATV (Ticket Promedio)', atv_tienda, '$,.0f'), use_container_width=True)
-            with kpi_col3:
-                st.altair_chart(crear_grafica_kpi(df_kpis, 'ASP_D_num', 'ASP (Precio Promedio)', asp_tienda, '$,.0f'), use_container_width=True)
-
-        # ==========================================
-        # VISTA INDIVIDUAL PARA EL ASESOR
-        # ==========================================
+        usuario_code = str(codigo_erp_bd).strip().lower()
+        user_row = df_v[df_v['codigo'].astype(str).str.strip().str.lower() == usuario_code]
+        
+        if user_row.empty and not st.session_state.es_admin:
+            st.header("📊 Tablero de Rendimiento Diario")
+            st.warning(f"No se encontraron registros de ventas para el código ERP: '{usuario_code}'.")
         else:
-            codigo_erp_bd = st.session_state.usuario_info.get('codigo_erp', '')
-            if not codigo_erp_bd or codigo_erp_bd == 'None':
-                codigo_erp_bd = st.session_state.usuario_actual
-                
-            usuario_code = str(codigo_erp_bd).strip().lower()
-            user_row = df_v[df_v['codigo'].astype(str).str.strip().str.lower() == usuario_code]
+            row_asesor = user_row.iloc[0] if not user_row.empty else df_v.iloc[0]
             
-            if user_row.empty:
-                st.header("📊 Tablero de Rendimiento Diario")
-                st.warning(f"No se encontraron registros de ventas para el código ERP: '{usuario_code}'.")
-            else:
-                row_asesor = user_row.iloc[0]
-                
-                nombre_asesor = row_asesor.get('nombre', usuario_code)
-                venta_asesor_neto = row_asesor.get('Neto_D_num', 0.0)
-                meta_asesor = row_asesor.get('meta_mensual', 282800.23)
-                alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
-                falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
-                
-                upt_asesor = row_asesor.get('UPT_D_num', 0.0)
-                atv_asesor = row_asesor.get('ATV_D_num', 0.0)
-                asp_asesor = row_asesor.get('ASP_D_num', 0.0)
+            nombre_asesor = row_asesor.get('nombre', usuario_code)
+            venta_asesor_neto = row_asesor.get('Neto_D_num', 0.0)
+            meta_asesor = row_asesor.get('meta_mensual', 282800.23)
+            alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
+            falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
+            
+            upt_asesor = row_asesor.get('UPT_D_num', 0.0)
+            atv_asesor = row_asesor.get('ATV_D_num', 0.0)
+            asp_asesor = row_asesor.get('ASP_D_num', 0.0)
 
-                df_ranked = df_v.sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-                if not df_ranked.empty:
-                    primer_lugar_nombre = df_ranked.iloc[0]['nombre']
-                    primer_lugar_venta = df_ranked.iloc[0]['Neto_D_num']
-                    
+            df_ranked = df_v.sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
+            if not df_ranked.empty:
+                primer_lugar_nombre = df_ranked.iloc[0]['nombre']
+                primer_lugar_venta = df_ranked.iloc[0]['Neto_D_num']
+                
+                if "admin" not in st.session_state.usuario_actual.lower():
                     if str(nombre_asesor) == str(primer_lugar_nombre):
                         st.success(f"🏆 ¡Felicidades, {nombre_asesor}! Lideras la red de ventas, continúa así.")
                         if not st.session_state.felicitacion_mostrada:
@@ -484,63 +439,79 @@ with tab_perf:
                     else:
                         diferencia = primer_lugar_venta - venta_asesor_neto
                         st.info(f"⚡ ¡Excelente esfuerzo, {nombre_asesor}! Estás a **${diferencia:,.2f}** de conectar con el primer lugar ({primer_lugar_nombre}).")
-                
-                st.header("📊 Tablero de Rendimiento Diario")
+            
+            st.header("📊 Tablero de Rendimiento Diario")
 
-                col_t, col_a = st.columns(2)
-                with col_t:
-                    st.subheader("🏬 PERFORMANCE TIENDA")
-                    st.markdown(f"""
-                    <div class="kpi-card">
-                        <h4>Meta Tienda: ${meta_tienda_total:,.2f}</h4>
-                        <p><b>Venta Acumulada Neta:</b> ${venta_tienda_neto:,.2f}</p>
-                        <p><b>Falta para la Meta:</b> ${falta_tienda:,.2f}</p>
-                        <p><b>Alcance:</b> {alcance_tienda_pct:.1f}%</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.progress(min(1.0, alcance_tienda_pct / 100))
+            col_t, col_a = st.columns(2)
+            with col_t:
+                st.subheader("🏬 PERFORMANCE TIENDA")
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <h4>Meta Tienda: ${meta_tienda_total:,.2f}</h4>
+                    <p><b>Venta Acumulada Neta:</b> ${venta_tienda_neto:,.2f}</p>
+                    <p><b>Falta para la Meta:</b> ${falta_tienda:,.2f}</p>
+                    <p><b>Alcance:</b> {alcance_tienda_pct:.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(min(1.0, alcance_tienda_pct / 100))
 
-                with col_a:
-                    st.subheader(f"👤 MI PERFORMANCE ({nombre_asesor})")
-                    st.markdown(f"""
-                    <div class="kpi-card">
-                        <h4>Mi Meta Mensual: ${meta_asesor:,.2f}</h4>
-                        <p><b>Mi Venta Neta:</b> ${venta_asesor_neto:,.2f}</p>
-                        <p><b>Falta para Mi Meta:</b> ${falta_asesor:,.2f}</p>
-                        <p><b>Mi Alcance:</b> {alcance_asesor_pct:.1f}%</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.progress(min(1.0, alcance_asesor_pct / 100))
+            with col_a:
+                st.subheader(f"👤 MI PERFORMANCE ({nombre_asesor})")
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <h4>Mi Meta Mensual: ${meta_asesor:,.2f}</h4>
+                    <p><b>Mi Venta Neta:</b> ${venta_asesor_neto:,.2f}</p>
+                    <p><b>Falta para Mi Meta:</b> ${falta_asesor:,.2f}</p>
+                    <p><b>Mi Alcance:</b> {alcance_asesor_pct:.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(min(1.0, alcance_asesor_pct / 100))
 
-                st.markdown("---")
-                st.subheader("🎯 Comparativa de KPIs Operativos")
-                
-                kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
-                with kpi_c1:
-                    diff_upt = upt_asesor - upt_tienda
-                    st.metric(label="UPT (Unidades x Ticket)", value=f"{upt_asesor:.2f}", delta=f"{diff_upt:+.2f} vs Tienda ({upt_tienda:.2f})", delta_color="normal")
-                with kpi_c2:
-                    diff_atv = atv_asesor - atv_tienda
-                    signo_atv = "+" if diff_atv >= 0 else "-"
-                    st.metric(label="ATV (Ticket Promedio)", value=f"${atv_asesor:,.2f}", delta=f"{signo_atv}\\${abs(diff_atv):,.2f} vs Tienda (\\${atv_tienda:,.2f})", delta_color="normal")
-                with kpi_c3:
-                    diff_asp = asp_asesor - asp_tienda
-                    signo_asp = "+" if diff_asp >= 0 else "-"
-                    st.metric(label="ASP (Precio Promedio)", value=f"${asp_asesor:,.2f}", delta=f"{signo_asp}\\${abs(diff_asp):,.2f} vs Tienda (\\${asp_tienda:,.2f})", delta_color="normal")
-
-                st.markdown("---")
-                st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
-                
-                df_chart_user = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-                df_chart_user['Color'] = df_chart_user['nombre'].apply(lambda x: '#39FF88' if str(x) == str(nombre_asesor) else '#00D9F5')
-                
-                bars_a = alt.Chart(df_chart_user).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-                    x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
-                    y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
-                    color=alt.Color('Color:N', scale=None)
+            st.markdown("---")
+            st.subheader("🎯 Comparativa de KPIs Operativos")
+            
+            kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
+            with kpi_c1:
+                diff_upt = upt_asesor - upt_tienda
+                st.metric(
+                    label="UPT (Unidades x Ticket)", 
+                    value=f"{upt_asesor:.2f}", 
+                    delta=f"{diff_upt:+.2f} vs Tienda ({upt_tienda:.2f})",
+                    delta_color="normal"
                 )
-                text_a = bars_a.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
-                st.altair_chart(bars_a + text_a, use_container_width=True)
+            with kpi_c2:
+                diff_atv = atv_asesor - atv_tienda
+                signo_atv = "+" if diff_atv >= 0 else "-"
+                st.metric(
+                    label="ATV (Ticket Promedio)", 
+                    value=f"${atv_asesor:,.2f}", 
+                    delta=f"{signo_atv}\\${abs(diff_atv):,.2f} vs Tienda (\\${atv_tienda:,.2f})",
+                    delta_color="normal"
+                )
+            with kpi_c3:
+                diff_asp = asp_asesor - asp_tienda
+                signo_asp = "+" if diff_asp >= 0 else "-"
+                st.metric(
+                    label="ASP (Precio Promedio)", 
+                    value=f"${asp_asesor:,.2f}", 
+                    delta=f"{signo_asp}\\${abs(diff_asp):,.2f} vs Tienda (\\${asp_tienda:,.2f})",
+                    delta_color="normal"
+                )
+
+            st.markdown("---")
+            st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
+            
+            df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
+            df_chart['Color'] = df_chart['nombre'].apply(lambda x: '#39FF88' if str(x) == str(nombre_asesor) else '#00D9F5')
+            
+            bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+                x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
+                color=alt.Color('Color:N', scale=None)
+            )
+            text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
+            
+            st.altair_chart(bars + text, use_container_width=True)
 
 # ------------------------------------------
 # 2. PESTAÑA: BÚSQUEDA MANUAL
@@ -567,6 +538,7 @@ with tab_busqueda:
         query = supabase.table("catalogo_erp").select("*")
         if solo_disp: query = query.gt("stock_sistema", 0)
         
+        # AQUÍ ESTÁ EL FILTRO CORREGIDO Y LIMPIO
         if in_ref: 
             query = query.or_(
                 f"referencia.ilike.%{in_ref.strip()}%, "
