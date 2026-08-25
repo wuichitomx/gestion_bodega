@@ -8,16 +8,12 @@ from supabase import create_client
 from dotenv import load_dotenv
 
 # --- CONFIGURACIÓN DE SUPABASE ---
-# Las claves ya NO viven aquí en el código. Se leen desde un archivo .env
-# que se queda solo en tu computadora y nunca se sube a GitHub.
 load_dotenv()
 
 URL = os.getenv("SUPABASE_URL")
 KEY = os.getenv("SUPABASE_KEY")
 
 if not URL or not KEY:
-    # Si falta el archivo .env o las claves dentro de él, avisamos con un
-    # mensaje claro en vez de que la app truene sin explicación.
     messagebox.showerror(
         "Falta configuración",
         "No se encontraron SUPABASE_URL y/o SUPABASE_KEY.\n\n"
@@ -27,8 +23,6 @@ if not URL or not KEY:
     sys.exit(1)
 
 supabase = create_client(URL, KEY)
-
-ARCHIVO_CATALOGO = "RPInv_Extracto_Referencia.csv"
 
 # --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
 def limpiar_codigo(val):
@@ -49,15 +43,31 @@ def extraer_talla(referencia):
   return "N/A"
 
 def cargar_inventario():
-  if os.path.exists(ARCHIVO_CATALOGO):
-    try:
-      df = pd.read_csv(ARCHIVO_CATALOGO, skiprows=5, encoding="utf-8-sig")
-      df = df.dropna(subset=["CodigoAlterno"])
-      df["CodigoLimpio"] = df["CodigoAlterno"].apply(limpiar_codigo)
-      df["Talla"] = df["Referencia"].apply(extraer_talla)
+  """Carga el catálogo de productos directamente desde la tabla 'catalogo_erp' en Supabase."""
+  try:
+    # Hacemos una consulta paginada o general a Supabase para traernos todo el catálogo
+    respuesta = supabase.table("catalogo_erp").select("codigo_limpio, referencia, descripcion, talla").execute()
+    
+    if respuesta.data:
+      df = pd.DataFrame(respuesta.data)
+      # Normalizamos los nombres de columnas para que encajen perfectamente con la interfaz
+      df = df.rename(columns={
+          "codigo_limpio": "CodigoLimpio",
+          "referencia": "Referencia",
+          "descripcion": "Descripcion",
+          "talla": "Talla"
+      })
+      df["CodigoLimpio"] = df["CodigoLimpio"].apply(limpiar_codigo)
+      # Si la talla viene vacía en Supabase, la recalculamos de la referencia por seguridad
+      if "Talla" not in df.columns or df["Talla"].isna().all():
+        df["Talla"] = df["Referencia"].apply(extraer_talla)
+      else:
+        df["Talla"] = df["Talla"].fillna("N/A")
+        
       return df
-    except Exception:
-      pass
+  except Exception as e:
+    print(f"⚠️ Error al conectar con Supabase para el catálogo: {e}")
+  
   return pd.DataFrame()
 
 def guardar_ubicacion(codigo, nueva_ubicacion, cantidad=1):
@@ -89,7 +99,6 @@ def guardar_ubicacion(codigo, nueva_ubicacion, cantidad=1):
       
     return cant_actual
   except Exception as e:
-    # AQUÍ ESTÁ LA TRAMPA: Esto lanzará una ventana con el error exacto.
     messagebox.showerror("Error en Supabase", f"No se pudo guardar.\nDetalle técnico:\n\n{str(e)}")
     print(f"❌ Error crítico al guardar en Supabase: {e}")
     return 0
