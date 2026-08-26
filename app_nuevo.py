@@ -158,7 +158,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.5 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.14 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -188,7 +188,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.5 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.14 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -199,7 +199,7 @@ with st.sidebar:
     st.markdown("---")
 
 # ==========================================
-# FUNCIONES DE IA
+# FUNCIONES DE IA Y ANÁLISIS
 # ==========================================
 def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
     try:
@@ -219,6 +219,207 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
     except Exception as e:
         return f"⚠️ Error al procesar: {e}", "Error"
 
+def agrupar_top_n(df, campo_valor, campo_categoria, top_n=5):
+    """Deja solo las 'top_n' categorías más grandes y junta el resto en una
+    sola fila 'Otros', para que las gráficas de dona no muestren docenas de
+    leyendas diminutas. El total (suma de valores) no cambia."""
+    df_ordenado = df.sort_values(by=campo_valor, ascending=False).reset_index(drop=True)
+    if len(df_ordenado) <= top_n:
+        return df_ordenado
+    
+    df_top = df_ordenado.iloc[:top_n].copy()
+    valor_otros = df_ordenado.iloc[top_n:][campo_valor].sum()
+    fila_otros = pd.DataFrame({campo_categoria: ["Otros"], campo_valor: [valor_otros]})
+    return pd.concat([df_top, fila_otros], ignore_index=True)
+
+def crear_grafica_barras_inteligente(df, campo_x, campo_y, titulo_x, titulo_y, color_base='#39FF88', umbral_adentro=15):
+    """Genera barras estrictamente ordenadas de mayor a menor con números dentro (oscuros) o fuera (claros)."""
+    # Ordenamiento explícito en Pandas (deja el DataFrame ya en orden, como respaldo)
+    df_sorted = df.sort_values(by=campo_x, ascending=False).reset_index(drop=True)
+    
+    # Orden explícito como lista de Python: es la forma más a prueba de
+    # fallos de decirle a Vega-Lite el orden exacto, sin depender de que
+    # calcule el sort por su cuenta (lo cual no siempre se respeta en
+    # gráficas con varias capas, como esta).
+    orden_y = df_sorted[campo_y].tolist()
+    
+    base = alt.Chart(df_sorted).encode(
+        y=alt.Y(f'{campo_y}:N', sort=orden_y, title=titulo_y),
+        x=alt.X(f'{campo_x}:Q', title=titulo_x)
+    )
+    
+    barras = base.mark_bar(color=color_base)
+    
+    # Texto ADENTRO (para valores grandes, alineado a la derecha dentro de la barra, color negro)
+    texto_adentro = base.transform_filter(
+        alt.datum[campo_x] > umbral_adentro
+    ).mark_text(align='right', dx=-8, baseline='middle', color='#111111', fontWeight='bold', fontSize=11).encode(
+        text=alt.Text(f'{campo_x}:Q', format=',.0f')
+    )
+    
+    # Texto AFUERA (para valores pequeños, alineado a la derecha fuera de la barra, color blanco)
+    texto_afuera = base.transform_filter(
+        alt.datum[campo_x] <= umbral_adentro
+    ).mark_text(align='left', dx=5, baseline='middle', color='#FFFFFF', fontSize=11).encode(
+        text=alt.Text(f'{campo_x}:Q', format=',.0f')
+    )
+    
+    return (barras + texto_adentro + texto_afuera)
+
+def mostrar_resumen_piso_ventas(supabase):
+    """Función avanzada para procesar el Resumen Ejecutivo de Piso de Ventas con visualización limpia e inteligente."""
+    st.header("📊 Resumen Ejecutivo: Piso de Ventas (PV)")
+    
+    res_ubic_all = supabase.table("ubicaciones").select("*").execute()
+    res_cat = supabase.table("catalogo_erp").select("codigo_limpio, referencia, descripcion, nivel1, nivel2, nivel3, nivel4").execute()
+    
+    if not res_ubic_all.data:
+        st.warning("No hay registros en la tabla de ubicaciones.")
+        return
+        
+    df_ubic_all = pd.DataFrame(res_ubic_all.data)
+    df_cat = pd.DataFrame(res_cat.data)
+    
+    df_ubic_pv = df_ubic_all[df_ubic_all['ubicacion'].astype(str).str.strip().str.upper() == 'PV'].copy()
+    df_ubic_bodega = df_ubic_all[df_ubic_all['ubicacion'].astype(str).str.strip().str.upper() != 'PV'].copy()
+    
+    if df_ubic_pv.empty:
+        st.warning("No hay productos registrados específicamente en la ubicación 'PV' (Piso de Ventas).")
+        return
+        
+    df_cruce = pd.merge(df_ubic_pv, df_cat, on="codigo_limpio", how="left")
+    df_cruce.fillna({
+        "nivel1": "Sin Categoría", 
+        "nivel2": "Sin Actividad",
+        "nivel3": "Sin Subcategoría", 
+        "nivel4": "Sin Nivel 4",
+        "referencia": "Desconocida", 
+        "descripcion": "Sin descripción"
+    }, inplace=True)
+    
+    df_cruce['modelo_base'] = df_cruce['referencia'].astype(str).apply(lambda x: x.split('-')[0].strip())
+    
+    total_piezas = df_cruce['cantidad'].sum()
+    st.metric("Total de Piezas en Piso (PV)", f"{total_piezas:,.0f}")
+    st.divider()
+    
+    # --- GRÁFICAS GENERALES ---
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Mezcla por Categoría General")
+        df_cat1 = df_cruce.groupby("nivel1")['cantidad'].sum().reset_index()
+        df_cat1 = agrupar_top_n(df_cat1, 'cantidad', 'nivel1', top_n=5)
+        df_cat1['Porcentaje (%)'] = (df_cat1['cantidad'] / total_piezas) * 100
+        df_cat1['Etiqueta_Leyenda'] = df_cat1.apply(lambda r: f"{r['nivel1']} ({r['Porcentaje (%)']:.1f}%)", axis=1)
+        # La leyenda de Vega-Lite ordena alfabéticamente por default, sin
+        # importar el orden de los datos. Le pasamos el orden real
+        # (de mayor a menor porcentaje) de forma explícita.
+        orden_leyenda_cat1 = df_cat1.sort_values('cantidad', ascending=False)['Etiqueta_Leyenda'].tolist()
+        
+        # Leyenda colocada en el lateral derecho (orient='right')
+        dona_cat1 = alt.Chart(df_cat1).mark_arc(innerRadius=55).encode(
+            theta=alt.Theta(field="cantidad", type="quantitative"),
+            color=alt.Color(field="Etiqueta_Leyenda", type="nominal", sort=orden_leyenda_cat1, legend=alt.Legend(title="Categoría", orient="right")),
+            tooltip=[
+                alt.Tooltip('nivel1:N', title='Categoría'), 
+                alt.Tooltip('cantidad:Q', title='Piezas', format=',.0f'), 
+                alt.Tooltip('Porcentaje (%):Q', format='.1f')
+            ]
+        ).properties(height=340)
+        
+        st.altair_chart(dona_cat1, use_container_width=True)
+        
+    with col2:
+        st.subheader("Subcategorías (Volumen)")
+        df_cat3 = df_cruce.groupby("nivel3")['cantidad'].sum().reset_index()
+        chart_cat3 = crear_grafica_barras_inteligente(df_cat3, 'cantidad', 'nivel3', 'Piezas Físicas', None, color_base='#00D9F5', umbral_adentro=30)
+        st.altair_chart(chart_cat3.properties(height=340), use_container_width=True)
+
+    st.divider()
+    
+    # --- ANÁLISIS POR ACTIVIDAD / DEPORTE ---
+    st.subheader("🏃‍♂️ Análisis por Actividad / Deporte")
+    st.caption("Visualiza la mezcla por deporte en **Porcentaje (%)**, **Piezas Físicas** y **Variedad de Modelos**.")
+    
+    # La dona de "Mezcla Porcentual" ahora ocupa su propio renglón completo
+    # (antes competía por espacio con las otras dos gráficas en 3 columnas
+    # iguales, lo que la dejaba chica y con la leyenda recortada).
+    st.markdown("##### 🍩 Mezcla Porcentual (%)")
+    df_act_pct = df_cruce.groupby("nivel2")['cantidad'].sum().reset_index()
+    df_act_pct = agrupar_top_n(df_act_pct, 'cantidad', 'nivel2', top_n=5)
+    df_act_pct['Porcentaje (%)'] = (df_act_pct['cantidad'] / total_piezas) * 100
+    df_act_pct['Etiqueta_Leyenda'] = df_act_pct.apply(lambda r: f"{r['nivel2']} ({r['Porcentaje (%)']:.1f}%)", axis=1)
+    orden_leyenda_act = df_act_pct.sort_values('cantidad', ascending=False)['Etiqueta_Leyenda'].tolist()
+    
+    dona_act_base = alt.Chart(df_act_pct).encode(
+        theta=alt.Theta(field="cantidad", type="quantitative", stack=True),
+        color=alt.Color(field="Etiqueta_Leyenda", type="nominal", sort=orden_leyenda_act, legend=alt.Legend(title="Deporte", orient="right")),
+        order=alt.Order(field="cantidad", sort="descending"),
+        tooltip=[
+            alt.Tooltip('nivel2:N', title='Deporte'), 
+            alt.Tooltip('cantidad:Q', title='Piezas', format=',.0f'), 
+            alt.Tooltip('Porcentaje (%):Q', format='.1f')
+        ]
+    )
+    dona_act_arco = dona_act_base.mark_arc(innerRadius=90, outerRadius=180)
+    # El porcentaje ahora se dibuja directo sobre cada rebanada (no solo en
+    # la leyenda), así se lee el dato aunque el nombre de la categoría
+    # quede recortado en la leyenda lateral.
+    dona_act_texto = dona_act_base.mark_text(radius=210, fontSize=13, fontWeight='bold').encode(
+        text=alt.Text('Porcentaje (%):Q', format='.1f')
+    )
+    st.altair_chart((dona_act_arco + dona_act_texto).properties(height=480), use_container_width=True)
+
+    col_act2, col_act3 = st.columns(2)
+    with col_act2:
+        st.markdown("##### 📊 Volumen en Piezas")
+        df_act_p = df_cruce.groupby("nivel2")['cantidad'].sum().reset_index()
+        chart_act_p = crear_grafica_barras_inteligente(df_act_p, 'cantidad', 'nivel2', 'Total Piezas', None, color_base='#39FF88', umbral_adentro=25)
+        st.altair_chart(chart_act_p.properties(height=360), use_container_width=True)
+        
+    with col_act3:
+        st.markdown("##### 📋 Variedad de Modelos")
+        df_act_r = df_cruce.groupby("nivel2")['modelo_base'].nunique().reset_index().rename(columns={'modelo_base': 'total_modelos'})
+        chart_act_r = crear_grafica_barras_inteligente(df_act_r, 'total_modelos', 'nivel2', 'Modelos', None, color_base='#00D9F5', umbral_adentro=8)
+        st.altair_chart(chart_act_r.properties(height=360), use_container_width=True)
+
+    st.divider()
+    
+    # --- ALERTA DE PICOS ---
+    st.subheader("⚠️ Alerta de Picos / Destalladas")
+    st.markdown("Modelos con **menos de 4 piezas en total** en Piso de Ventas (incluyendo 1, 2 y 3 piezas), indicando existencia en bodega.")
+    
+    df_ref_pv = df_cruce.groupby(['modelo_base', 'descripcion'])['cantidad'].sum().reset_index()
+    df_picos = df_ref_pv[df_ref_pv['cantidad'] < 4].copy()
+    
+    if not df_ubic_bodega.empty:
+        df_cruce_bodega = pd.merge(df_ubic_bodega, df_cat, on="codigo_limpio", how="left")
+        df_cruce_bodega['modelo_base'] = df_cruce_bodega['referencia'].astype(str).apply(lambda x: x.split('-')[0].strip())
+        df_bodega_totales = df_cruce_bodega.groupby('modelo_base')['cantidad'].sum().reset_index().rename(columns={'cantidad': 'piezas_bodega'})
+    else:
+        df_bodega_totales = pd.DataFrame(columns=['modelo_base', 'piezas_bodega'])
+        
+    df_picos = pd.merge(df_picos, df_bodega_totales, on='modelo_base', how='left')
+    df_picos['piezas_bodega'] = df_picos['piezas_bodega'].fillna(0).astype(int)
+    df_picos = df_picos.sort_values(by="cantidad")
+    
+    if not df_picos.empty:
+        df_tabla_final = df_picos.rename(columns={
+            "modelo_base": "Modelo (Ref Base)", 
+            "descripcion": "Descripción", 
+            "cantidad": "Piezas en Piso (PV)",
+            "piezas_bodega": "Disponible en Bodega"
+        })
+        
+        st.dataframe(
+            df_tabla_final[['Modelo (Ref Base)', 'Descripción', 'Piezas en Piso (PV)', 'Disponible en Bodega']],
+            use_container_width=True,
+            hide_index=True
+        )
+        st.info(f"Se detectaron {len(df_picos)} modelos con menos de 4 piezas en piso de ventas.")
+    else:
+        st.success("¡Excelente! Todos los modelos exhibidos en piso tienen 4 o más piezas.")
+
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
 # ==========================================
@@ -229,15 +430,15 @@ if not nombre_usuario_actual or nombre_usuario_actual == 'None':
 st.title(f"⚡ ¡Bienvenid@, {nombre_usuario_actual}!")
 
 if st.session_state.es_admin:
-    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
-    tab_perf, tab_busqueda, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
+    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📈 Resumen PV", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
+    tab_perf, tab_busqueda, tab_resumen_pv, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5]
 else:
     tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual"])
     tab_perf, tab_busqueda = tabs[0], tabs[1]
-    tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None
+    tab_resumen_pv, tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None, None
 
 # ------------------------------------------
-# 4. PESTAÑA: ADMIN & CARGA ERP (SÓLO ADMIN)
+# 5. PESTAÑA: ADMIN & CARGA ERP (SÓLO ADMIN)
 # ------------------------------------------
 if tab_admin_erp is not None:
     with tab_admin_erp:
@@ -246,13 +447,9 @@ if tab_admin_erp is not None:
         
         if archivo_sales is not None:
             try:
-                # Leemos el Excel omitiendo las 2 primeras filas corporativas
                 df_raw = pd.read_excel(archivo_sales, header=2)
-                
-                # Filtramos para descartar filas vacías o la fila de totales
                 df_raw = df_raw[df_raw['No. Línea'].notna() & (df_raw['No. Línea'].astype(str).str.strip().str.upper() != 'TOTALES')]
                 
-                # Mapeo exacto de las columnas oficiales del reporte de Excel
                 df_raw['codigo'] = df_raw['Código de Vendedor'].astype(str).str.strip()
                 df_raw['nombre'] = df_raw['Vendedor'].astype(str).str.strip()
                 
@@ -261,7 +458,6 @@ if tab_admin_erp is not None:
                 df_raw['ATV_D_num'] = pd.to_numeric(df_raw['Venta x Documento'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
                 df_raw['ASP_D_num'] = pd.to_numeric(df_raw['Precio x Unidad'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
                 
-                # Extraemos los totales de tienda directamente de la fila de totales del Excel original
                 df_raw_totales = pd.read_excel(archivo_sales, header=2)
                 row_totales = df_raw_totales[df_raw_totales['No. Línea'].astype(str).str.strip().str.upper() == 'TOTALES']
                 
@@ -284,9 +480,6 @@ if tab_admin_erp is not None:
             except Exception as ex:
                 st.error(f"Error al procesar el archivo Excel: {ex}")
         
-        # ==========================================
-        # SECCIÓN: CARGA DE CATÁLOGO A SUPABASE
-        # ==========================================
         st.markdown("---")
         st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
         st.info("Sube aquí el archivo CSV de tu ERP (RPInv_Extracto_Referencia) para sincronizar la red en Supabase.")
@@ -330,8 +523,7 @@ if tab_admin_erp is not None:
 
                         TAMANO_BLOQUE = 500
                         total_registros = len(registros)
-                        total_bloques = max(1, -(-total_registros // TAMANO_BLOQUE))
-
+                        
                         barra_progreso = st.progress(0, text=f"Sincronizando 0 de {total_registros} artículos...")
 
                         for i in range(0, total_registros, TAMANO_BLOQUE):
@@ -379,7 +571,7 @@ if tab_admin_erp is not None:
                 st.rerun()
 
 # ------------------------------------------
-# 1. PESTAÑA: PERFORMANCE & KPIS (ACTUALIZADA V3.5 - GERENCIAL)
+# 1. PESTAÑA: PERFORMANCE & KPIS (DASHBOARD)
 # ------------------------------------------
 with tab_perf:
     if not os.path.exists("ventas_diarias_temp.csv"):
@@ -396,24 +588,18 @@ with tab_perf:
         else:
             df_v['meta_mensual'] = 0.0
 
-        # Ventas Totales de la Tienda
         venta_tienda_neto = df_v['Neto_T_num'].iloc[0] if 'Neto_T_num' in df_v.columns else 0.0
         meta_tienda_total = df_v['meta_mensual'].sum() if df_v['meta_mensual'].sum() > 0 else 1571112.40
         alcance_tienda_pct = (venta_tienda_neto / meta_tienda_total) * 100 if meta_tienda_total > 0 else 0
         falta_tienda = max(0.0, meta_tienda_total - venta_tienda_neto)
         
-        # PROMEDIOS OFICIALES REPORTADOS POR EL ERP
         upt_tienda = df_v['UPT_T_num'].iloc[0] if 'UPT_T_num' in df_v.columns else 0.0
         atv_tienda = df_v['ATV_T_num'].iloc[0] if 'ATV_T_num' in df_v.columns else 0.0
         asp_tienda = df_v['ASP_T_num'].iloc[0] if 'ASP_T_num' in df_v.columns else 0.0
 
-        # ==========================================
-        # VISTA EXCLUSIVA PARA EL ADMINISTRADOR
-        # ==========================================
         if st.session_state.es_admin:
             st.header("📊 Tablero Gerencial Diario")
             
-            # 1. Performance General de Tienda
             st.subheader("🏬 PERFORMANCE TIENDA")
             st.markdown(f"""
             <div class="kpi-card">
@@ -432,14 +618,17 @@ with tab_perf:
             max_venta = df_chart['Neto_D_num'].max()
             df_chart['Color'] = df_chart['Neto_D_num'].apply(lambda x: '#39FF88' if x == max_venta and x > 0 else '#00D9F5')
             
+            sort_vendedor = alt.EncodingSortField(field='Neto_D_num', op='sum', order='descending')
             bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-                x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
+                x=alt.X('nombre:N', sort=sort_vendedor, title='Asesor', axis=alt.Axis(labelAngle=-45)),
                 y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
-                color=alt.Color('Color:N', scale=None)
+                color=alt.Color('Color:N', scale=None),
+                tooltip=[alt.Tooltip('nombre:N', title='Asesor'), alt.Tooltip('Neto_D_num:Q', title='Venta Neta', format='$,.2f')]
             )
             text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
-            st.altair_chart(bars + text, use_container_width=True)
+            st.altair_chart((bars + text).properties(height=350), use_container_width=True)
 
+            # --- RADIOGRAFÍA OPERATIVA (KPIS POR ASESOR VS PROMEDIO TIENDA) ---
             st.markdown("---")
             st.subheader("🎯 Radiografía Operativa: KPIs por Asesor vs Promedio Tienda")
             st.caption("🟡 La línea amarilla punteada indica el promedio general de la tienda (reportado por el ERP).")
@@ -449,12 +638,26 @@ with tab_perf:
                 max_val = df_sorted[campo_y].max()
                 df_sorted['Color'] = df_sorted[campo_y].apply(lambda x: '#39FF88' if x == max_val and x > 0 else '#00D9F5')
                 
-                base = alt.Chart(df_sorted).encode(x=alt.X('nombre:N', sort=None, title=None, axis=alt.Axis(labelAngle=-45)))
+                # Orden explícito con lista de Python (ver nota en
+                # crear_grafica_barras_inteligente): más confiable que
+                # EncodingSortField en gráficas con varias capas.
+                orden_x = df_sorted['nombre'].tolist()
+                base = alt.Chart(df_sorted).encode(x=alt.X('nombre:N', sort=orden_x, title='Asesor', axis=alt.Axis(labelAngle=-45)))
                 bar = base.mark_bar(opacity=0.85, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
                     y=alt.Y(f'{campo_y}:Q', title=titulo),
-                    color=alt.Color('Color:N', scale=None)
+                    color=alt.Color('Color:N', scale=None),
+                    tooltip=[alt.Tooltip('nombre:N', title='Asesor'), alt.Tooltip(f'{campo_y}:Q', title=titulo, format=formato)]
                 )
-                text = bar.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(
+                # El valor se dibuja DENTRO de la barra, a la MITAD de su
+                # altura (no pegado a la punta), y GIRADO en vertical: como
+                # ahora la posición está fija en el punto medio (ya no con un
+                # desplazamiento dy), el giro queda centrado ahí sin
+                # desviarse. Vertical, el texto ocupa casi el ancho de una
+                # sola letra, así que ya no se encima con la barra vecina.
+                df_sorted['_mitad'] = df_sorted[campo_y] / 2
+                text = alt.Chart(df_sorted).mark_text(align='center', baseline='middle', angle=270, color='white', fontWeight='bold', fontSize=10).encode(
+                    x=alt.X('nombre:N', sort=orden_x),
+                    y=alt.Y('_mitad:Q'),
                     text=alt.Text(f'{campo_y}:Q', format=formato)
                 )
                 rule = alt.Chart(pd.DataFrame({campo_y: [promedio_tienda]})).mark_rule(
@@ -472,9 +675,6 @@ with tab_perf:
             with kpi_col3:
                 st.altair_chart(crear_grafica_kpi(df_kpis, 'ASP_D_num', 'ASP (Precio Promedio)', asp_tienda, '$,.0f'), use_container_width=True)
 
-        # ==========================================
-        # VISTA INDIVIDUAL PARA EL ASESOR
-        # ==========================================
         else:
             codigo_erp_bd = st.session_state.usuario_info.get('codigo_erp', '')
             if not codigo_erp_bd or codigo_erp_bd == 'None':
@@ -483,92 +683,25 @@ with tab_perf:
             usuario_code = str(codigo_erp_bd).strip().lower()
             user_row = df_v[df_v['codigo'].astype(str).str.strip().str.lower() == usuario_code]
             
-            if user_row.empty:
-                st.header("📊 Tablero de Rendimiento Diario")
-                st.warning(f"No se encontraron registros de ventas para el código ERP: '{usuario_code}'.")
-            else:
+            if not user_row.empty:
                 row_asesor = user_row.iloc[0]
-                
                 nombre_asesor = row_asesor.get('nombre', usuario_code)
                 venta_asesor_neto = row_asesor.get('Neto_D_num', 0.0)
                 meta_asesor = row_asesor.get('meta_mensual', 282800.23)
                 alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
                 falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
                 
-                upt_asesor = row_asesor.get('UPT_D_num', 0.0)
-                atv_asesor = row_asesor.get('ATV_D_num', 0.0)
-                asp_asesor = row_asesor.get('ASP_D_num', 0.0)
-
-                df_ranked = df_v.sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-                if not df_ranked.empty:
-                    primer_lugar_nombre = df_ranked.iloc[0]['nombre']
-                    primer_lugar_venta = df_ranked.iloc[0]['Neto_D_num']
-                    
-                    if str(nombre_asesor) == str(primer_lugar_nombre):
-                        st.success(f"🏆 ¡Felicidades, {nombre_asesor}! Lideras la red de ventas, continúa así.")
-                        if not st.session_state.felicitacion_mostrada:
-                            st.balloons()
-                            st.session_state.felicitacion_mostrada = True
-                    else:
-                        diferencia = primer_lugar_venta - venta_asesor_neto
-                        st.info(f"⚡ ¡Excelente esfuerzo, {nombre_asesor}! Estás a **${diferencia:,.2f}** de conectar con el primer lugar ({primer_lugar_nombre}).")
-                
                 st.header("📊 Tablero de Rendimiento Diario")
-
-                col_t, col_a = st.columns(2)
-                with col_t:
-                    st.subheader("🏬 PERFORMANCE EQUIPO")
-                    st.markdown(f"""
-                    <div class="kpi-card">
-                        <h4>Meta Tienda: ${meta_tienda_total:,.2f}</h4>
-                        <p><b>Venta Acumulada Neta:</b> ${venta_tienda_neto:,.2f}</p>
-                        <p><b>Falta para la Meta:</b> ${falta_tienda:,.2f}</p>
-                        <p><b>Alcance:</b> {alcance_tienda_pct:.1f}%</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.progress(min(1.0, alcance_tienda_pct / 100))
-
-                with col_a:
-                    st.subheader(f"👤 MI PERFORMANCE ({nombre_asesor})")
-                    st.markdown(f"""
-                    <div class="kpi-card">
-                        <h4>Mi Meta Mensual: ${meta_asesor:,.2f}</h4>
-                        <p><b>Mi Venta Neta:</b> ${venta_asesor_neto:,.2f}</p>
-                        <p><b>Falta para Mi Meta:</b> ${falta_asesor:,.2f}</p>
-                        <p><b>Mi Alcance:</b> {alcance_asesor_pct:.1f}%</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.progress(min(1.0, alcance_asesor_pct / 100))
-
-                st.markdown("---")
-                st.subheader("🎯 Comparativa de Mis KPIs Operativos")
-                
-                kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
-                with kpi_c1:
-                    diff_upt = upt_asesor - upt_tienda
-                    st.metric(label="UPT (Unidades x Ticket)", value=f"{upt_asesor:.2f}", delta=f"{diff_upt:+.2f} vs Promedio Tienda ({upt_tienda:.2f})", delta_color="normal")
-                with kpi_c2:
-                    diff_atv = atv_asesor - atv_tienda
-                    signo_atv = "+" if diff_atv >= 0 else "-"
-                    st.metric(label="ATV (Ticket Promedio)", value=f"${atv_asesor:,.2f}", delta=f"{signo_atv}\\${abs(diff_atv):,.2f} vs Promedio Tienda (\\${atv_tienda:,.2f})", delta_color="normal")
-                with kpi_c3:
-                    diff_asp = asp_asesor - asp_tienda
-                    signo_asp = "+" if diff_asp >= 0 else "-"
-                    st.metric(label="ASP (Precio Promedio)", value=f"${asp_asesor:,.2f}", delta=f"{signo_asp}\\${abs(diff_asp):,.2f} vs Promedio Tienda (\\${asp_tienda:,.2f})", delta_color="normal")
-
-                st.markdown("---")
-                st.subheader("📈 Ranking de Ventas Acumuladas por Vendedor ($)")
-                
-                df_chart_user = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-                df_chart_user['Color'] = df_chart_user['nombre'].apply(lambda x: '#39FF88' if str(x) == str(nombre_asesor) else '#00D9F5')
-                
-                bars_a = alt.Chart(df_chart_user).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-                    x=alt.X('nombre:N', sort=None, title='Asesor', axis=alt.Axis(labelAngle=-45)),
-                    y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
-                    color=alt.Color('Color:N', scale=None)
-                )
-                text_a = bars_a.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
-                st.altair_chart(bars_a + text_a, use_container_width=True)
+                st.subheader(f"👤 MI PERFORMANCE ({nombre_asesor})")
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <h4>Mi Meta Mensual: ${meta_asesor:,.2f}</h4>
+                    <p><b>Mi Venta Neta:</b> ${venta_asesor_neto:,.2f}</p>
+                    <p><b>Falta para Mi Meta:</b> ${falta_asesor:,.2f}</p>
+                    <p><b>Mi Alcance:</b> {alcance_asesor_pct:.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(min(1.0, alcance_asesor_pct / 100))
 
 # ------------------------------------------
 # 2. PESTAÑA: BÚSQUEDA MANUAL
@@ -656,7 +789,14 @@ with tab_busqueda:
             st.warning("Sin conexiones en la red.")
 
 # ------------------------------------------
-# 3. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
+# 3. PESTAÑA: RESUMEN EJECUTIVO (PV) (SÓLO ADMIN)
+# ------------------------------------------
+if tab_resumen_pv is not None:
+    with tab_resumen_pv:
+        mostrar_resumen_piso_ventas(supabase)
+
+# ------------------------------------------
+# 4. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
 # ------------------------------------------
 if tab_escaneo is not None:
     with tab_escaneo:
@@ -670,7 +810,7 @@ if tab_escaneo is not None:
                 st.warning("Producto no encontrado en el núcleo.")
 
 # ------------------------------------------
-# 5. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
+# 6. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
 # ------------------------------------------
 if tab_admin_user is not None:
     with tab_admin_user:
