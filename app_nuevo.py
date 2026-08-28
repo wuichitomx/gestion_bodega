@@ -158,7 +158,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.15 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.16 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -188,7 +188,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.15 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.16 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -220,9 +220,6 @@ def obtener_o_generar_storytelling(referencia, nombre_producto, categoria):
         return f"⚠️ Error al procesar: {e}", "Error"
 
 def agrupar_top_n(df, campo_valor, campo_categoria, top_n=5):
-    """Deja solo las 'top_n' categorías más grandes y junta el resto en una
-    sola fila 'Otros', para que las gráficas de dona no muestren docenas de
-    leyendas diminutas. El total (suma de valores) no cambia."""
     df_ordenado = df.sort_values(by=campo_valor, ascending=False).reset_index(drop=True)
     if len(df_ordenado) <= top_n:
         return df_ordenado
@@ -233,7 +230,6 @@ def agrupar_top_n(df, campo_valor, campo_categoria, top_n=5):
     return pd.concat([df_top, fila_otros], ignore_index=True)
 
 def crear_grafica_barras_inteligente(df, campo_x, campo_y, titulo_x, titulo_y, color_base='#39FF88', umbral_adentro=15):
-    """Genera barras estrictamente ordenadas de mayor a menor con números dentro (oscuros) o fuera (claros)."""
     df_sorted = df.sort_values(by=campo_x, ascending=False).reset_index(drop=True)
     orden_y = df_sorted[campo_y].tolist()
     
@@ -263,7 +259,7 @@ def mostrar_resumen_piso_ventas(supabase):
     st.header("📊 Resumen Ejecutivo: Piso de Ventas (PV)")
     
     res_ubic_all = supabase.table("ubicaciones").select("*").execute()
-    res_cat = supabase.table("catalogo_erp").select("codigo_limpio, referencia, descripcion, nivel1, nivel2, nivel3, nivel4").execute()
+    res_cat = supabase.table("catalogo_erp").select("codigo_limpio, referencia, descripcion, nivel1, nivel2, nivel3, nivel4, stock_sistema").execute()
     
     if not res_ubic_all.data:
         st.warning("No hay registros en la tabla de ubicaciones.")
@@ -286,7 +282,8 @@ def mostrar_resumen_piso_ventas(supabase):
         "nivel3": "Sin Subcategoría", 
         "nivel4": "Sin Nivel 4",
         "referencia": "Desconocida", 
-        "descripcion": "Sin descripción"
+        "descripcion": "Sin descripción",
+        "stock_sistema": 0
     }, inplace=True)
     
     df_cruce['modelo_base'] = df_cruce['referencia'].astype(str).apply(lambda x: x.split('-')[0].strip())
@@ -367,44 +364,64 @@ def mostrar_resumen_piso_ventas(supabase):
 
     st.divider()
     
-    # --- ALERTA DE PICOS ---
-    st.subheader("⚠️ Alerta de Picos / Destalladas")
-    st.markdown("Modelos con **menos de 4 piezas en total** en Piso de Ventas (incluyendo 1, 2 y 3 piezas), indicando existencia en bodega.")
+    # --- ALERTA DE PICOS / RESURTIDO ---
+    st.subheader("⚠️ Alerta de Picos / Resurtido")
+    st.markdown("Modelos con **menos de 4 piezas en total** en Piso de Ventas, cruzados con su existencia en bodega e inventario en sistema del ERP. Utiliza el selector por actividad para asignar tareas de resurtido a cada asesor.")
     
-    df_ref_pv = df_cruce.groupby(['modelo_base', 'descripcion'])['cantidad'].sum().reset_index()
+    # Selector de actividad (Nivel 2) para filtrar la tabla de resurtido por área responsable
+    lista_actividades = sorted(df_cruce['nivel2'].dropna().unique().tolist())
+    opciones_filtro = ["Todas las Áreas"] + lista_actividades
+    actividad_seleccionada = st.selectbox("🎯 Filtrar Resurtido por Área / Actividad (Responsable):", options=opciones_filtro)
+
+    # Agrupamos por modelo, descripción y actividad manteniendo la trazabilidad
+    df_ref_pv = df_cruce.groupby(['modelo_base', 'descripcion', 'nivel2'])['cantidad'].sum().reset_index()
     df_picos = df_ref_pv[df_ref_pv['cantidad'] < 4].copy()
     
+    if actividad_seleccionada != "Todas las Áreas":
+        df_picos = df_picos[df_picos['nivel2'] == actividad_seleccionada]
+
+    # Procesamos Bodega
     if not df_ubic_bodega.empty:
         df_cruce_bodega = pd.merge(df_ubic_bodega, df_cat, on="codigo_limpio", how="left")
-        
-        # --- PARCHE DE SEGURIDAD CONTRA NULOS EN BODEGA ---
         df_cruce_bodega['referencia'] = df_cruce_bodega['referencia'].fillna("Desconocida")
         df_cruce_bodega['modelo_base'] = df_cruce_bodega['referencia'].astype(str).apply(lambda x: str(x).split('-')[0].strip())
-        
         df_bodega_totales = df_cruce_bodega.groupby('modelo_base')['cantidad'].sum().reset_index().rename(columns={'cantidad': 'piezas_bodega'})
     else:
         df_bodega_totales = pd.DataFrame(columns=['modelo_base', 'piezas_bodega'])
         
+    # Procesamos Inventario en Sistema (ERP global por modelo base)
+    if not df_cat.empty:
+        df_cat['modelo_base'] = df_cat['referencia'].astype(str).apply(lambda x: str(x).split('-')[0].strip())
+        df_sistema_totales = df_cat.groupby('modelo_base')['stock_sistema'].sum().reset_index().rename(columns={'stock_sistema': 'inventario_sistema'})
+    else:
+        df_sistema_totales = pd.DataFrame(columns=['modelo_base', 'inventario_sistema'])
+
+    # Cruzamos ambas fuentes de stock
     df_picos = pd.merge(df_picos, df_bodega_totales, on='modelo_base', how='left')
+    df_picos = pd.merge(df_picos, df_sistema_totales, on='modelo_base', how='left')
+    
     df_picos['piezas_bodega'] = df_picos['piezas_bodega'].fillna(0).astype(int)
+    df_picos['inventario_sistema'] = df_picos['inventario_sistema'].fillna(0).astype(int)
     df_picos = df_picos.sort_values(by="cantidad")
     
     if not df_picos.empty:
         df_tabla_final = df_picos.rename(columns={
             "modelo_base": "Modelo (Ref Base)", 
             "descripcion": "Descripción", 
+            "nivel2": "Área / Actividad",
             "cantidad": "Piezas en Piso (PV)",
-            "piezas_bodega": "Disponible en Bodega"
+            "piezas_bodega": "Disponible en Bodega",
+            "inventario_sistema": "Inventario en Sistema"
         })
         
         st.dataframe(
-            df_tabla_final[['Modelo (Ref Base)', 'Descripción', 'Piezas en Piso (PV)', 'Disponible en Bodega']],
+            df_tabla_final[['Modelo (Ref Base)', 'Descripción', 'Área / Actividad', 'Piezas en Piso (PV)', 'Disponible en Bodega', 'Inventario en Sistema']],
             use_container_width=True,
             hide_index=True
         )
-        st.info(f"Se detectaron {len(df_picos)} modelos con menos de 4 piezas en piso de ventas.")
+        st.info(f"Se detectaron {len(df_picos)} modelos listos para ruta de resurtido en el área seleccionada.")
     else:
-        st.success("¡Excelente! Todos los modelos exhibidos en piso tienen 4 o más piezas.")
+        st.success("¡Excelente! No hay modelos con menos de 4 piezas en el área seleccionada.")
 
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
