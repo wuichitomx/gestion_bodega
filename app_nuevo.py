@@ -158,7 +158,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.17 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.21 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -188,7 +188,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.17 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.21 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -255,7 +255,6 @@ def crear_grafica_barras_inteligente(df, campo_x, campo_y, titulo_x, titulo_y, c
     return (barras + texto_adentro + texto_afuera)
 
 def mostrar_resumen_piso_ventas(supabase):
-    """Función avanzada para procesar el Resumen Ejecutivo de Piso de Ventas con visualización limpia e inteligente."""
     st.header("📊 Resumen Ejecutivo: Piso de Ventas (PV)")
     
     res_ubic_all = supabase.table("ubicaciones").select("*").execute()
@@ -292,7 +291,6 @@ def mostrar_resumen_piso_ventas(supabase):
     st.metric("Total de Piezas en Piso (PV)", f"{total_piezas:,.0f}")
     st.divider()
     
-    # --- GRÁFICAS GENERALES ---
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Mezcla por Categoría General")
@@ -322,7 +320,6 @@ def mostrar_resumen_piso_ventas(supabase):
 
     st.divider()
     
-    # --- ANÁLISIS POR ACTIVIDAD / DEPORTE ---
     st.subheader("🏃‍♂️ Análisis por Actividad / Deporte")
     st.caption("Visualiza la mezcla por deporte en **Porcentaje (%)**, **Piezas Físicas** y **Variedad de Modelos**.")
     
@@ -364,7 +361,6 @@ def mostrar_resumen_piso_ventas(supabase):
 
     st.divider()
     
-    # --- ALERTA DE PICOS / RESURTIDO ---
     st.subheader("⚠️ Alerta de Picos / Resurtido")
     st.markdown("Modelos con **menos de 4 piezas en total** en Piso de Ventas, cruzados con su existencia en bodega e inventario en sistema del ERP. Utiliza el selector por actividad para asignar tareas de resurtido a cada asesor.")
     
@@ -382,9 +378,12 @@ def mostrar_resumen_piso_ventas(supabase):
         df_cruce_bodega = pd.merge(df_ubic_bodega, df_cat, on="codigo_limpio", how="left")
         df_cruce_bodega['referencia'] = df_cruce_bodega['referencia'].fillna("Desconocida")
         df_cruce_bodega['modelo_base'] = df_cruce_bodega['referencia'].astype(str).apply(lambda x: str(x).split('-')[0].strip())
+        
         df_bodega_totales = df_cruce_bodega.groupby('modelo_base')['cantidad'].sum().reset_index().rename(columns={'cantidad': 'piezas_bodega'})
+        df_bodega_ubic = df_cruce_bodega.groupby('modelo_base')['ubicacion'].apply(lambda x: ", ".join(x.dropna().astype(str).unique())).reset_index().rename(columns={'ubicacion': 'Ubicaciones en Bodega'})
+        df_bodega_totales = pd.merge(df_bodega_totales, df_bodega_ubic, on='modelo_base', how='left')
     else:
-        df_bodega_totales = pd.DataFrame(columns=['modelo_base', 'piezas_bodega'])
+        df_bodega_totales = pd.DataFrame(columns=['modelo_base', 'piezas_bodega', 'Ubicaciones en Bodega'])
         
     if not df_cat.empty:
         df_cat['modelo_base'] = df_cat['referencia'].astype(str).apply(lambda x: str(x).split('-')[0].strip())
@@ -396,6 +395,7 @@ def mostrar_resumen_piso_ventas(supabase):
     df_picos = pd.merge(df_picos, df_sistema_totales, on='modelo_base', how='left')
     
     df_picos['piezas_bodega'] = df_picos['piezas_bodega'].fillna(0).astype(int)
+    df_picos['Ubicaciones en Bodega'] = df_picos['Ubicaciones en Bodega'].fillna("No escaneado")
     df_picos['inventario_sistema'] = df_picos['inventario_sistema'].fillna(0).astype(int)
     df_picos = df_picos.sort_values(by="cantidad")
     
@@ -406,11 +406,12 @@ def mostrar_resumen_piso_ventas(supabase):
             "nivel2": "Área / Actividad",
             "cantidad": "Piezas en Piso (PV)",
             "piezas_bodega": "Disponible en Bodega",
+            "Ubicaciones en Bodega": "Ubicaciones en Bodega",
             "inventario_sistema": "Inventario en Sistema"
         })
         
         st.dataframe(
-            df_tabla_final[['Modelo (Ref Base)', 'Descripción', 'Área / Actividad', 'Piezas en Piso (PV)', 'Disponible en Bodega', 'Inventario en Sistema']],
+            df_tabla_final[['Modelo (Ref Base)', 'Descripción', 'Área / Actividad', 'Piezas en Piso (PV)', 'Disponible en Bodega', 'Ubicaciones en Bodega', 'Inventario en Sistema']],
             use_container_width=True,
             hide_index=True
         )
@@ -426,6 +427,53 @@ if not nombre_usuario_actual or nombre_usuario_actual == 'None':
     nombre_usuario_actual = st.session_state.usuario_actual
 
 st.title(f"⚡ ¡Bienvenid@, {nombre_usuario_actual}!")
+
+# --- LÓGICA DE FELICITACIÓN Y LIDERAZGO MULTI-KPI ---
+if os.path.exists("ventas_diarias_temp.csv"):
+    df_v_felicitacion = pd.read_csv("ventas_diarias_temp.csv")
+    if not df_v_felicitacion.empty and 'codigo' in df_v_felicitacion.columns:
+        codigo_erp_bd_actual = st.session_state.usuario_info.get('codigo_erp', '')
+        if not codigo_erp_bd_actual or codigo_erp_bd_actual == 'None':
+            codigo_erp_bd_actual = st.session_state.usuario_actual
+        usuario_code_actual = str(codigo_erp_bd_actual).strip().lower()
+        
+        # Verificamos líderes en cada categoría si existen las columnas
+        es_top_cualquiera = False
+        
+        # 1. Ventas Netas
+        if 'Neto_D_num' in df_v_felicitacion.columns:
+            top_neto = df_v_felicitacion.loc[df_v_felicitacion['Neto_D_num'].idxmax()]
+            if usuario_code_actual == str(top_neto['codigo']).strip().lower() and top_neto['Neto_D_num'] > 0:
+                es_top_cualquiera = True
+                if not st.session_state.felicitacion_mostrada:
+                    st.balloons()
+                    st.session_state.felicitacion_mostrada = True
+                st.success(f"🏆 ¡Felicidades, {top_neto['nombre']}! Eres el primer lugar en ventas con ${top_neto['Neto_D_num']:,.2f}. ¡Sigue así, liderando la red!")
+
+        # 2. UPT
+        if 'UPT_D_num' in df_v_felicitacion.columns:
+            top_upt = df_v_felicitacion.loc[df_v_felicitacion['UPT_D_num'].idxmax()]
+            if usuario_code_actual == str(top_upt['codigo']).strip().lower() and top_upt['UPT_D_num'] > 0:
+                es_top_cualquiera = True
+                st.success(f"🎯 ¡Felicidades, {top_upt['nombre']}! Eres el primer lugar en UPT con {top_upt['UPT_D_num']:,.2f} unidades por ticket. ¡Excelente trabajo!")
+
+        # 3. ASP
+        if 'ASP_D_num' in df_v_felicitacion.columns:
+            top_asp = df_v_felicitacion.loc[df_v_felicitacion['ASP_D_num'].idxmax()]
+            if usuario_code_actual == str(top_asp['codigo']).strip().lower() and top_asp['ASP_D_num'] > 0:
+                es_top_cualquiera = True
+                st.success(f"💎 ¡Felicidades, {top_asp['nombre']}! Eres el primer lugar en ASP con un precio promedio de ${top_asp['ASP_D_num']:,.2f}. ¡Imparable!")
+
+        # 4. ATV
+        if 'ATV_D_num' in df_v_felicitacion.columns:
+            top_atv = df_v_felicitacion.loc[df_v_felicitacion['ATV_D_num'].idxmax()]
+            if usuario_code_actual == str(top_atv['codigo']).strip().lower() and top_atv['ATV_D_num'] > 0:
+                es_top_cualquiera = True
+                st.success(f"🔥 ¡Felicidades, {top_atv['nombre']}! Eres el primer lugar en ATV con un ticket promedio de ${top_atv['ATV_D_num']:,.2f}. ¡Sigue liderando!")
+
+        if not st.session_state.felicitacion_mostrada and es_top_cualquiera:
+            st.balloons()
+            st.session_state.felicitacion_mostrada = True
 
 if st.session_state.es_admin:
     tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📈 Resumen PV", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
@@ -480,15 +528,15 @@ if tab_admin_erp is not None:
         
         st.markdown("---")
         st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
-        st.info("Sube aquí el archivo CSV de tu ERP (RPInv_Extracto_Referencia) para sincronizar la red en Supabase.")
+        st.info("Sube aquí el archivo de tu ERP (RPInv_Extracto_Referencia) en formato Excel para sincronizar la red en Supabase.")
 
-        archivo_catalogo = st.file_uploader("Subir CSV de Catálogo", type=["csv"], key="cat_csv")
+        archivo_catalogo = st.file_uploader("Subir Catálogo (Excel)", type=["xlsx", "xls"], key="cat_csv")
 
         if archivo_catalogo is not None:
             if st.button("⚡ Sincronizar Catálogo en la Nube"):
                 try:
                     with st.spinner("Estableciendo sinapsis y sincronizando el núcleo... Esto puede tomar unos segundos."):
-                        df_cat = pd.read_csv(archivo_catalogo, encoding='latin1', skiprows=5, dtype=str)
+                        df_cat = pd.read_excel(archivo_catalogo, skiprows=5, dtype=str)
                         
                         mapeo_columnas = {
                             'CodigoAlterno': 'codigo_limpio',
@@ -595,7 +643,6 @@ with tab_perf:
         atv_tienda = df_v['ATV_T_num'].iloc[0] if 'ATV_T_num' in df_v.columns else 0.0
         asp_tienda = df_v['ASP_T_num'].iloc[0] if 'ASP_T_num' in df_v.columns else 0.0
 
-        # Función de gráficas globales extraída para que tanto Admin como Asesores puedan usarla
         def crear_grafica_kpi(df, campo_y, titulo, promedio_tienda, formato):
             df_sorted = df.sort_values(campo_y, ascending=False).reset_index(drop=True)
             max_val = df_sorted[campo_y].max()
@@ -619,7 +666,6 @@ with tab_perf:
             ).encode(y=f'{campo_y}:Q')
             return (bar + text + rule).properties(height=320, title=f"{titulo}")
 
-        # ==== 1. VISTA PERSONAL DEL ASESOR ====
         if not st.session_state.es_admin:
             codigo_erp_bd = st.session_state.usuario_info.get('codigo_erp', '')
             if not codigo_erp_bd or codigo_erp_bd == 'None':
@@ -636,7 +682,14 @@ with tab_perf:
                 alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
                 falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
                 
-                # Cálculos de Objetivos (71%, 81%, 91%)
+                # Cálculo de cuánto falta para alcanzar al primer lugar en ventas
+                max_venta_red = df_v['Neto_D_num'].max()
+                diferencia_primer_lugar = max_venta_red - venta_asesor_neto
+                if diferencia_primer_lugar > 0:
+                    texto_primer_lugar = f"🎯 <b>Te faltan ${diferencia_primer_lugar:,.2f} para alcanzar al 1.er lugar en ventas</b>"
+                else:
+                    texto_primer_lugar = "👑 <b>¡Vas a la cabeza del primer lugar en ventas!</b>"
+
                 meta_71 = meta_asesor * 0.71
                 falta_71 = max(0.0, meta_71 - venta_asesor_neto)
                 txt_71 = f"${falta_71:,.2f}" if falta_71 > 0 else "✅ ¡Alcanzado!"
@@ -658,6 +711,7 @@ with tab_perf:
                     <h4>Mi Meta Mensual: ${meta_asesor:,.2f}</h4>
                     <p><b>Mi Venta Neta:</b> ${venta_asesor_neto:,.2f}</p>
                     <p><b>Mi Alcance:</b> {alcance_asesor_pct:.1f}%</p>
+                    <p>{texto_primer_lugar}</p>
                     <hr style="border-color: rgba(57,255,136,0.2); margin: 10px 0;">
                     <p>🎯 <b>Falta para Primer Objetivo (71%):</b> {txt_71}</p>
                     <p>🎯 <b>Falta para Segundo Objetivo (81%):</b> {txt_81}</p>
@@ -668,7 +722,6 @@ with tab_perf:
                 st.progress(min(1.0, alcance_asesor_pct / 100))
                 st.markdown("---")
 
-        # ==== 2. TABLERO GENERAL (Visible para Admin y Asesores) ====
         if st.session_state.es_admin:
             st.header("📊 Tablero Gerencial Diario")
         else:
@@ -702,7 +755,6 @@ with tab_perf:
         text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
         st.altair_chart((bars + text).properties(height=350), use_container_width=True)
 
-        # ==== 3. RADIOGRAFÍA OPERATIVA (Visible para Admin y Asesores) ====
         st.markdown("---")
         st.subheader("🎯 Radiografía Operativa: KPIs por Asesor vs Promedio Tienda")
         st.caption("🟡 La línea amarilla punteada indica el promedio general de la tienda (reportado por el ERP).")
