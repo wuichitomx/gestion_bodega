@@ -158,7 +158,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.14 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.15 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -188,7 +188,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.14 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.15 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -234,13 +234,7 @@ def agrupar_top_n(df, campo_valor, campo_categoria, top_n=5):
 
 def crear_grafica_barras_inteligente(df, campo_x, campo_y, titulo_x, titulo_y, color_base='#39FF88', umbral_adentro=15):
     """Genera barras estrictamente ordenadas de mayor a menor con números dentro (oscuros) o fuera (claros)."""
-    # Ordenamiento explícito en Pandas (deja el DataFrame ya en orden, como respaldo)
     df_sorted = df.sort_values(by=campo_x, ascending=False).reset_index(drop=True)
-    
-    # Orden explícito como lista de Python: es la forma más a prueba de
-    # fallos de decirle a Vega-Lite el orden exacto, sin depender de que
-    # calcule el sort por su cuenta (lo cual no siempre se respeta en
-    # gráficas con varias capas, como esta).
     orden_y = df_sorted[campo_y].tolist()
     
     base = alt.Chart(df_sorted).encode(
@@ -250,14 +244,12 @@ def crear_grafica_barras_inteligente(df, campo_x, campo_y, titulo_x, titulo_y, c
     
     barras = base.mark_bar(color=color_base)
     
-    # Texto ADENTRO (para valores grandes, alineado a la derecha dentro de la barra, color negro)
     texto_adentro = base.transform_filter(
         alt.datum[campo_x] > umbral_adentro
     ).mark_text(align='right', dx=-8, baseline='middle', color='#111111', fontWeight='bold', fontSize=11).encode(
         text=alt.Text(f'{campo_x}:Q', format=',.0f')
     )
     
-    # Texto AFUERA (para valores pequeños, alineado a la derecha fuera de la barra, color blanco)
     texto_afuera = base.transform_filter(
         alt.datum[campo_x] <= umbral_adentro
     ).mark_text(align='left', dx=5, baseline='middle', color='#FFFFFF', fontSize=11).encode(
@@ -311,12 +303,8 @@ def mostrar_resumen_piso_ventas(supabase):
         df_cat1 = agrupar_top_n(df_cat1, 'cantidad', 'nivel1', top_n=5)
         df_cat1['Porcentaje (%)'] = (df_cat1['cantidad'] / total_piezas) * 100
         df_cat1['Etiqueta_Leyenda'] = df_cat1.apply(lambda r: f"{r['nivel1']} ({r['Porcentaje (%)']:.1f}%)", axis=1)
-        # La leyenda de Vega-Lite ordena alfabéticamente por default, sin
-        # importar el orden de los datos. Le pasamos el orden real
-        # (de mayor a menor porcentaje) de forma explícita.
         orden_leyenda_cat1 = df_cat1.sort_values('cantidad', ascending=False)['Etiqueta_Leyenda'].tolist()
         
-        # Leyenda colocada en el lateral derecho (orient='right')
         dona_cat1 = alt.Chart(df_cat1).mark_arc(innerRadius=55).encode(
             theta=alt.Theta(field="cantidad", type="quantitative"),
             color=alt.Color(field="Etiqueta_Leyenda", type="nominal", sort=orden_leyenda_cat1, legend=alt.Legend(title="Categoría", orient="right")),
@@ -341,9 +329,6 @@ def mostrar_resumen_piso_ventas(supabase):
     st.subheader("🏃‍♂️ Análisis por Actividad / Deporte")
     st.caption("Visualiza la mezcla por deporte en **Porcentaje (%)**, **Piezas Físicas** y **Variedad de Modelos**.")
     
-    # La dona de "Mezcla Porcentual" ahora ocupa su propio renglón completo
-    # (antes competía por espacio con las otras dos gráficas en 3 columnas
-    # iguales, lo que la dejaba chica y con la leyenda recortada).
     st.markdown("##### 🍩 Mezcla Porcentual (%)")
     df_act_pct = df_cruce.groupby("nivel2")['cantidad'].sum().reset_index()
     df_act_pct = agrupar_top_n(df_act_pct, 'cantidad', 'nivel2', top_n=5)
@@ -362,9 +347,6 @@ def mostrar_resumen_piso_ventas(supabase):
         ]
     )
     dona_act_arco = dona_act_base.mark_arc(innerRadius=90, outerRadius=180)
-    # El porcentaje ahora se dibuja directo sobre cada rebanada (no solo en
-    # la leyenda), así se lee el dato aunque el nombre de la categoría
-    # quede recortado en la leyenda lateral.
     dona_act_texto = dona_act_base.mark_text(radius=210, fontSize=13, fontWeight='bold').encode(
         text=alt.Text('Porcentaje (%):Q', format='.1f')
     )
@@ -394,7 +376,11 @@ def mostrar_resumen_piso_ventas(supabase):
     
     if not df_ubic_bodega.empty:
         df_cruce_bodega = pd.merge(df_ubic_bodega, df_cat, on="codigo_limpio", how="left")
-        df_cruce_bodega['modelo_base'] = df_cruce_bodega['referencia'].astype(str).apply(lambda x: x.split('-')[0].strip())
+        
+        # --- PARCHE DE SEGURIDAD CONTRA NULOS EN BODEGA ---
+        df_cruce_bodega['referencia'] = df_cruce_bodega['referencia'].fillna("Desconocida")
+        df_cruce_bodega['modelo_base'] = df_cruce_bodega['referencia'].astype(str).apply(lambda x: str(x).split('-')[0].strip())
+        
         df_bodega_totales = df_cruce_bodega.groupby('modelo_base')['cantidad'].sum().reset_index().rename(columns={'cantidad': 'piezas_bodega'})
     else:
         df_bodega_totales = pd.DataFrame(columns=['modelo_base', 'piezas_bodega'])
@@ -638,9 +624,6 @@ with tab_perf:
                 max_val = df_sorted[campo_y].max()
                 df_sorted['Color'] = df_sorted[campo_y].apply(lambda x: '#39FF88' if x == max_val and x > 0 else '#00D9F5')
                 
-                # Orden explícito con lista de Python (ver nota en
-                # crear_grafica_barras_inteligente): más confiable que
-                # EncodingSortField en gráficas con varias capas.
                 orden_x = df_sorted['nombre'].tolist()
                 base = alt.Chart(df_sorted).encode(x=alt.X('nombre:N', sort=orden_x, title='Asesor', axis=alt.Axis(labelAngle=-45)))
                 bar = base.mark_bar(opacity=0.85, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
@@ -648,12 +631,6 @@ with tab_perf:
                     color=alt.Color('Color:N', scale=None),
                     tooltip=[alt.Tooltip('nombre:N', title='Asesor'), alt.Tooltip(f'{campo_y}:Q', title=titulo, format=formato)]
                 )
-                # El valor se dibuja DENTRO de la barra, a la MITAD de su
-                # altura (no pegado a la punta), y GIRADO en vertical: como
-                # ahora la posición está fija en el punto medio (ya no con un
-                # desplazamiento dy), el giro queda centrado ahí sin
-                # desviarse. Vertical, el texto ocupa casi el ancho de una
-                # sola letra, así que ya no se encima con la barra vecina.
                 df_sorted['_mitad'] = df_sorted[campo_y] / 2
                 text = alt.Chart(df_sorted).mark_text(align='center', baseline='middle', angle=270, color='white', fontWeight='bold', fontSize=10).encode(
                     x=alt.X('nombre:N', sort=orden_x),
