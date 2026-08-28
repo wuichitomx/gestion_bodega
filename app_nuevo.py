@@ -158,7 +158,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.16 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.17 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -188,7 +188,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.16 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.17 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -368,19 +368,16 @@ def mostrar_resumen_piso_ventas(supabase):
     st.subheader("⚠️ Alerta de Picos / Resurtido")
     st.markdown("Modelos con **menos de 4 piezas en total** en Piso de Ventas, cruzados con su existencia en bodega e inventario en sistema del ERP. Utiliza el selector por actividad para asignar tareas de resurtido a cada asesor.")
     
-    # Selector de actividad (Nivel 2) para filtrar la tabla de resurtido por área responsable
     lista_actividades = sorted(df_cruce['nivel2'].dropna().unique().tolist())
     opciones_filtro = ["Todas las Áreas"] + lista_actividades
     actividad_seleccionada = st.selectbox("🎯 Filtrar Resurtido por Área / Actividad (Responsable):", options=opciones_filtro)
 
-    # Agrupamos por modelo, descripción y actividad manteniendo la trazabilidad
     df_ref_pv = df_cruce.groupby(['modelo_base', 'descripcion', 'nivel2'])['cantidad'].sum().reset_index()
     df_picos = df_ref_pv[df_ref_pv['cantidad'] < 4].copy()
     
     if actividad_seleccionada != "Todas las Áreas":
         df_picos = df_picos[df_picos['nivel2'] == actividad_seleccionada]
 
-    # Procesamos Bodega
     if not df_ubic_bodega.empty:
         df_cruce_bodega = pd.merge(df_ubic_bodega, df_cat, on="codigo_limpio", how="left")
         df_cruce_bodega['referencia'] = df_cruce_bodega['referencia'].fillna("Desconocida")
@@ -389,14 +386,12 @@ def mostrar_resumen_piso_ventas(supabase):
     else:
         df_bodega_totales = pd.DataFrame(columns=['modelo_base', 'piezas_bodega'])
         
-    # Procesamos Inventario en Sistema (ERP global por modelo base)
     if not df_cat.empty:
         df_cat['modelo_base'] = df_cat['referencia'].astype(str).apply(lambda x: str(x).split('-')[0].strip())
         df_sistema_totales = df_cat.groupby('modelo_base')['stock_sistema'].sum().reset_index().rename(columns={'stock_sistema': 'inventario_sistema'})
     else:
         df_sistema_totales = pd.DataFrame(columns=['modelo_base', 'inventario_sistema'])
 
-    # Cruzamos ambas fuentes de stock
     df_picos = pd.merge(df_picos, df_bodega_totales, on='modelo_base', how='left')
     df_picos = pd.merge(df_picos, df_sistema_totales, on='modelo_base', how='left')
     
@@ -600,76 +595,32 @@ with tab_perf:
         atv_tienda = df_v['ATV_T_num'].iloc[0] if 'ATV_T_num' in df_v.columns else 0.0
         asp_tienda = df_v['ASP_T_num'].iloc[0] if 'ASP_T_num' in df_v.columns else 0.0
 
-        if st.session_state.es_admin:
-            st.header("📊 Tablero Gerencial Diario")
+        # Función de gráficas globales extraída para que tanto Admin como Asesores puedan usarla
+        def crear_grafica_kpi(df, campo_y, titulo, promedio_tienda, formato):
+            df_sorted = df.sort_values(campo_y, ascending=False).reset_index(drop=True)
+            max_val = df_sorted[campo_y].max()
+            df_sorted['Color'] = df_sorted[campo_y].apply(lambda x: '#39FF88' if x == max_val and x > 0 else '#00D9F5')
             
-            st.subheader("🏬 PERFORMANCE TIENDA")
-            st.markdown(f"""
-            <div class="kpi-card">
-                <h4>Meta Tienda: ${meta_tienda_total:,.2f}</h4>
-                <p><b>Venta Acumulada Neta:</b> ${venta_tienda_neto:,.2f}</p>
-                <p><b>Falta para la Meta:</b> ${falta_tienda:,.2f}</p>
-                <p><b>Alcance:</b> {alcance_tienda_pct:.1f}%</p>
-            </div>
-            """, unsafe_allow_html=True)
-            st.progress(min(1.0, alcance_tienda_pct / 100))
-            
-            st.markdown("---")
-            st.subheader("📈 Ranking de Ventas Acumuladas por Asesor ($)")
-            
-            df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
-            max_venta = df_chart['Neto_D_num'].max()
-            df_chart['Color'] = df_chart['Neto_D_num'].apply(lambda x: '#39FF88' if x == max_venta and x > 0 else '#00D9F5')
-            
-            sort_vendedor = alt.EncodingSortField(field='Neto_D_num', op='sum', order='descending')
-            bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-                x=alt.X('nombre:N', sort=sort_vendedor, title='Asesor', axis=alt.Axis(labelAngle=-45)),
-                y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
+            orden_x = df_sorted['nombre'].tolist()
+            base = alt.Chart(df_sorted).encode(x=alt.X('nombre:N', sort=orden_x, title='Asesor', axis=alt.Axis(labelAngle=-45)))
+            bar = base.mark_bar(opacity=0.85, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                y=alt.Y(f'{campo_y}:Q', title=titulo),
                 color=alt.Color('Color:N', scale=None),
-                tooltip=[alt.Tooltip('nombre:N', title='Asesor'), alt.Tooltip('Neto_D_num:Q', title='Venta Neta', format='$,.2f')]
+                tooltip=[alt.Tooltip('nombre:N', title='Asesor'), alt.Tooltip(f'{campo_y}:Q', title=titulo, format=formato)]
             )
-            text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
-            st.altair_chart((bars + text).properties(height=350), use_container_width=True)
+            df_sorted['_mitad'] = df_sorted[campo_y] / 2
+            text = alt.Chart(df_sorted).mark_text(align='center', baseline='middle', angle=270, color='white', fontWeight='bold', fontSize=10).encode(
+                x=alt.X('nombre:N', sort=orden_x),
+                y=alt.Y('_mitad:Q'),
+                text=alt.Text(f'{campo_y}:Q', format=formato)
+            )
+            rule = alt.Chart(pd.DataFrame({campo_y: [promedio_tienda]})).mark_rule(
+                color='#FFD700', strokeWidth=3, strokeDash=[5, 5]
+            ).encode(y=f'{campo_y}:Q')
+            return (bar + text + rule).properties(height=320, title=f"{titulo}")
 
-            # --- RADIOGRAFÍA OPERATIVA (KPIS POR ASESOR VS PROMEDIO TIENDA) ---
-            st.markdown("---")
-            st.subheader("🎯 Radiografía Operativa: KPIs por Asesor vs Promedio Tienda")
-            st.caption("🟡 La línea amarilla punteada indica el promedio general de la tienda (reportado por el ERP).")
-
-            def crear_grafica_kpi(df, campo_y, titulo, promedio_tienda, formato):
-                df_sorted = df.sort_values(campo_y, ascending=False).reset_index(drop=True)
-                max_val = df_sorted[campo_y].max()
-                df_sorted['Color'] = df_sorted[campo_y].apply(lambda x: '#39FF88' if x == max_val and x > 0 else '#00D9F5')
-                
-                orden_x = df_sorted['nombre'].tolist()
-                base = alt.Chart(df_sorted).encode(x=alt.X('nombre:N', sort=orden_x, title='Asesor', axis=alt.Axis(labelAngle=-45)))
-                bar = base.mark_bar(opacity=0.85, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-                    y=alt.Y(f'{campo_y}:Q', title=titulo),
-                    color=alt.Color('Color:N', scale=None),
-                    tooltip=[alt.Tooltip('nombre:N', title='Asesor'), alt.Tooltip(f'{campo_y}:Q', title=titulo, format=formato)]
-                )
-                df_sorted['_mitad'] = df_sorted[campo_y] / 2
-                text = alt.Chart(df_sorted).mark_text(align='center', baseline='middle', angle=270, color='white', fontWeight='bold', fontSize=10).encode(
-                    x=alt.X('nombre:N', sort=orden_x),
-                    y=alt.Y('_mitad:Q'),
-                    text=alt.Text(f'{campo_y}:Q', format=formato)
-                )
-                rule = alt.Chart(pd.DataFrame({campo_y: [promedio_tienda]})).mark_rule(
-                    color='#FFD700', strokeWidth=3, strokeDash=[5, 5]
-                ).encode(y=f'{campo_y}:Q')
-                return (bar + text + rule).properties(height=320, title=f"{titulo}")
-
-            df_kpis = df_v[['nombre', 'UPT_D_num', 'ATV_D_num', 'ASP_D_num']].copy()
-            
-            kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
-            with kpi_col1:
-                st.altair_chart(crear_grafica_kpi(df_kpis, 'UPT_D_num', 'UPT (Unidades x Ticket)', upt_tienda, '.2f'), use_container_width=True)
-            with kpi_col2:
-                st.altair_chart(crear_grafica_kpi(df_kpis, 'ATV_D_num', 'ATV (Ticket Promedio)', atv_tienda, '$,.0f'), use_container_width=True)
-            with kpi_col3:
-                st.altair_chart(crear_grafica_kpi(df_kpis, 'ASP_D_num', 'ASP (Precio Promedio)', asp_tienda, '$,.0f'), use_container_width=True)
-
-        else:
+        # ==== 1. VISTA PERSONAL DEL ASESOR ====
+        if not st.session_state.es_admin:
             codigo_erp_bd = st.session_state.usuario_info.get('codigo_erp', '')
             if not codigo_erp_bd or codigo_erp_bd == 'None':
                 codigo_erp_bd = st.session_state.usuario_actual
@@ -685,17 +636,86 @@ with tab_perf:
                 alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
                 falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
                 
-                st.header("📊 Tablero de Rendimiento Diario")
+                # Cálculos de Objetivos (71%, 81%, 91%)
+                meta_71 = meta_asesor * 0.71
+                falta_71 = max(0.0, meta_71 - venta_asesor_neto)
+                txt_71 = f"${falta_71:,.2f}" if falta_71 > 0 else "✅ ¡Alcanzado!"
+                
+                meta_81 = meta_asesor * 0.81
+                falta_81 = max(0.0, meta_81 - venta_asesor_neto)
+                txt_81 = f"${falta_81:,.2f}" if falta_81 > 0 else "✅ ¡Alcanzado!"
+                
+                meta_91 = meta_asesor * 0.91
+                falta_91 = max(0.0, meta_91 - venta_asesor_neto)
+                txt_91 = f"${falta_91:,.2f}" if falta_91 > 0 else "✅ ¡Alcanzado!"
+                
+                txt_100 = f"${falta_asesor:,.2f}" if falta_asesor > 0 else "🚀 ¡Meta Superada!"
+                
+                st.header("📊 Mi Tablero de Rendimiento")
                 st.subheader(f"👤 MI PERFORMANCE ({nombre_asesor})")
                 st.markdown(f"""
                 <div class="kpi-card">
                     <h4>Mi Meta Mensual: ${meta_asesor:,.2f}</h4>
                     <p><b>Mi Venta Neta:</b> ${venta_asesor_neto:,.2f}</p>
-                    <p><b>Falta para Mi Meta:</b> ${falta_asesor:,.2f}</p>
                     <p><b>Mi Alcance:</b> {alcance_asesor_pct:.1f}%</p>
+                    <hr style="border-color: rgba(57,255,136,0.2); margin: 10px 0;">
+                    <p>🎯 <b>Falta para Primer Objetivo (71%):</b> {txt_71}</p>
+                    <p>🎯 <b>Falta para Segundo Objetivo (81%):</b> {txt_81}</p>
+                    <p>🎯 <b>Falta para Tercer Objetivo (91%):</b> {txt_91}</p>
+                    <p>🏆 <b>Falta para Meta Final (100%):</b> {txt_100}</p>
                 </div>
                 """, unsafe_allow_html=True)
                 st.progress(min(1.0, alcance_asesor_pct / 100))
+                st.markdown("---")
+
+        # ==== 2. TABLERO GENERAL (Visible para Admin y Asesores) ====
+        if st.session_state.es_admin:
+            st.header("📊 Tablero Gerencial Diario")
+        else:
+            st.header("🏢 Tablero General de la Tienda")
+            
+        st.subheader("🏬 PERFORMANCE TIENDA")
+        st.markdown(f"""
+        <div class="kpi-card">
+            <h4>Meta Tienda: ${meta_tienda_total:,.2f}</h4>
+            <p><b>Venta Acumulada Neta:</b> ${venta_tienda_neto:,.2f}</p>
+            <p><b>Falta para la Meta:</b> ${falta_tienda:,.2f}</p>
+            <p><b>Alcance:</b> {alcance_tienda_pct:.1f}%</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.progress(min(1.0, alcance_tienda_pct / 100))
+        
+        st.markdown("---")
+        st.subheader("📈 Ranking de Ventas Acumuladas por Asesor ($)")
+        
+        df_chart = df_v[['nombre', 'Neto_D_num']].sort_values('Neto_D_num', ascending=False).reset_index(drop=True)
+        max_venta = df_chart['Neto_D_num'].max()
+        df_chart['Color'] = df_chart['Neto_D_num'].apply(lambda x: '#39FF88' if x == max_venta and x > 0 else '#00D9F5')
+        
+        sort_vendedor = alt.EncodingSortField(field='Neto_D_num', op='sum', order='descending')
+        bars = alt.Chart(df_chart).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+            x=alt.X('nombre:N', sort=sort_vendedor, title='Asesor', axis=alt.Axis(labelAngle=-45)),
+            y=alt.Y('Neto_D_num:Q', title='Venta Neta ($)'),
+            color=alt.Color('Color:N', scale=None),
+            tooltip=[alt.Tooltip('nombre:N', title='Asesor'), alt.Tooltip('Neto_D_num:Q', title='Venta Neta', format='$,.2f')]
+        )
+        text = bars.mark_text(align='center', baseline='bottom', dy=-5, color='white').encode(text=alt.Text('Neto_D_num:Q', format='$,.0f'))
+        st.altair_chart((bars + text).properties(height=350), use_container_width=True)
+
+        # ==== 3. RADIOGRAFÍA OPERATIVA (Visible para Admin y Asesores) ====
+        st.markdown("---")
+        st.subheader("🎯 Radiografía Operativa: KPIs por Asesor vs Promedio Tienda")
+        st.caption("🟡 La línea amarilla punteada indica el promedio general de la tienda (reportado por el ERP).")
+
+        df_kpis = df_v[['nombre', 'UPT_D_num', 'ATV_D_num', 'ASP_D_num']].copy()
+        
+        kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
+        with kpi_col1:
+            st.altair_chart(crear_grafica_kpi(df_kpis, 'UPT_D_num', 'UPT (Unidades x Ticket)', upt_tienda, '.2f'), use_container_width=True)
+        with kpi_col2:
+            st.altair_chart(crear_grafica_kpi(df_kpis, 'ATV_D_num', 'ATV (Ticket Promedio)', atv_tienda, '$,.0f'), use_container_width=True)
+        with kpi_col3:
+            st.altair_chart(crear_grafica_kpi(df_kpis, 'ASP_D_num', 'ASP (Precio Promedio)', asp_tienda, '$,.0f'), use_container_width=True)
 
 # ------------------------------------------
 # 2. PESTAÑA: BÚSQUEDA MANUAL
