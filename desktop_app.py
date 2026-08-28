@@ -1,23 +1,21 @@
 from datetime import datetime
 import os
 import sys
+import json
 import tkinter as tk
 from tkinter import messagebox, ttk
+import customtkinter as ctk  # <-- NUEVA LIBRERÍA MODERNIZADA
 import pandas as pd
 from supabase import create_client
 from dotenv import load_dotenv
 
 # --- CONFIGURACIÓN DE SUPABASE ---
-# Las claves ya NO viven aquí en el código. Se leen desde un archivo .env
-# que se queda solo en tu computadora y nunca se sube a GitHub.
 load_dotenv()
 
 URL = os.getenv("SUPABASE_URL")
 KEY = os.getenv("SUPABASE_KEY")
 
 if not URL or not KEY:
-    # Si falta el archivo .env o las claves dentro de él, avisamos con un
-    # mensaje claro en vez de que la app truene sin explicación.
     messagebox.showerror(
         "Falta configuración",
         "No se encontraron SUPABASE_URL y/o SUPABASE_KEY.\n\n"
@@ -28,7 +26,21 @@ if not URL or not KEY:
 
 supabase = create_client(URL, KEY)
 
-ARCHIVO_CATALOGO = "RPInv_Extracto_Referencia.csv"
+# --- ARCHIVO LOCAL PARA GUARDAR ESCANEOS PENDIENTES DE SINCRONIZAR ---
+ARCHIVO_PENDIENTES = "pendientes_offline.json"
+
+def cargar_pendientes():
+    if os.path.exists(ARCHIVO_PENDIENTES):
+        try:
+            with open(ARCHIVO_PENDIENTES, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def guardar_pendientes(lista):
+    with open(ARCHIVO_PENDIENTES, "w", encoding="utf-8") as f:
+        json.dump(lista, f, ensure_ascii=False, indent=2)
 
 # --- FUNCIONES DE BASE DE DATOS (SUPABASE) ---
 def limpiar_codigo(val):
@@ -49,15 +61,24 @@ def extraer_talla(referencia):
   return "N/A"
 
 def cargar_inventario():
-  if os.path.exists(ARCHIVO_CATALOGO):
-    try:
-      df = pd.read_csv(ARCHIVO_CATALOGO, skiprows=5, encoding="utf-8-sig")
-      df = df.dropna(subset=["CodigoAlterno"])
-      df["CodigoLimpio"] = df["CodigoAlterno"].apply(limpiar_codigo)
-      df["Talla"] = df["Referencia"].apply(extraer_talla)
+  try:
+    respuesta = supabase.table("catalogo_erp").select("codigo_limpio, referencia, descripcion, talla").execute()
+    if respuesta.data:
+      df = pd.DataFrame(respuesta.data)
+      df = df.rename(columns={
+          "codigo_limpio": "CodigoLimpio",
+          "referencia": "Referencia",
+          "descripcion": "Descripcion",
+          "talla": "Talla"
+      })
+      df["CodigoLimpio"] = df["CodigoLimpio"].apply(limpiar_codigo)
+      if "Talla" not in df.columns or df["Talla"].isna().all():
+        df["Talla"] = df["Referencia"].apply(extraer_talla)
+      else:
+        df["Talla"] = df["Talla"].fillna("N/A")
       return df
-    except Exception:
-      pass
+  except Exception as e:
+    print(f"⚠️ Error al conectar con Supabase para el catálogo: {e}")
   return pd.DataFrame()
 
 def guardar_ubicacion(codigo, nueva_ubicacion, cantidad=1):
@@ -68,10 +89,8 @@ def guardar_ubicacion(codigo, nueva_ubicacion, cantidad=1):
     return 0
 
   fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
-  
   try:
     res = supabase.table("ubicaciones").select("cantidad").eq("codigo_limpio", codigo_limpio).eq("ubicacion", nueva_ubicacion).execute()
-    
     if res.data and len(res.data) > 0:
       cant_actual = res.data[0]["cantidad"] + cantidad
       supabase.table("ubicaciones").update({
@@ -86,12 +105,9 @@ def guardar_ubicacion(codigo, nueva_ubicacion, cantidad=1):
           "cantidad": cant_actual,
           "fecha": fecha_actual
       }).execute()
-      
     return cant_actual
   except Exception as e:
-    # AQUÍ ESTÁ LA TRAMPA: Esto lanzará una ventana con el error exacto.
     messagebox.showerror("Error en Supabase", f"No se pudo guardar.\nDetalle técnico:\n\n{str(e)}")
-    print(f"❌ Error crítico al guardar en Supabase: {e}")
     return 0
 
 def restar_ubicacion(codigo, ubicacion, cantidad=1):
@@ -103,7 +119,6 @@ def restar_ubicacion(codigo, ubicacion, cantidad=1):
 
   try:
     res = supabase.table("ubicaciones").select("cantidad").eq("codigo_limpio", codigo_limpio).eq("ubicacion", ubicacion).execute()
-    
     nueva_cant = 0
     if res.data and len(res.data) > 0:
       cant_actual = res.data[0]["cantidad"]
@@ -119,28 +134,145 @@ def restar_ubicacion(codigo, ubicacion, cantidad=1):
     return nueva_cant
   except Exception as e:
     messagebox.showerror("Error en Supabase", f"No se pudo restar.\nDetalle técnico:\n\n{str(e)}")
-    print(f"❌ Error crítico al restar en Supabase: {e}")
     return 0
 
-# --- INTERFAZ GRÁFICA ---
+
+# --- INTERFAZ GRÁFICA MODERNA (CustomTkinter) ---
 class SistemaBodegaApp:
   def __init__(self, root):
     self.root = root
-    self.root.title("Sistema de Inventario y Bodega (Nube)")
-    self.root.geometry("1000x750")
+    self.root.title("⚡ Sinapsis - Inventario y Bodega")
+    self.root.geometry("1050x780")
+    
+    # Configuración base del tema oscuro estilo Streamlit
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+
     self.df_inv = cargar_inventario()
 
-    self.notebook = ttk.Notebook(self.root)
-    self.notebook.pack(fill="both", expand=True)
+    # Variables de Estado Offline
+    self.modo_offline = False
+    self.cola_pendiente = cargar_pendientes()
 
-    self.tab_escaneo = tk.Frame(self.notebook, padx=10, pady=10)
-    self.tab_traspaso = tk.Frame(self.notebook, padx=10, pady=10)
+    self.configurar_estilo_tabla()
+    self.setup_barra_offline()
 
-    self.notebook.add(self.tab_escaneo, text=" 📦 Escaneo por Estante ")
-    self.notebook.add(self.tab_traspaso, text=" 🔄 Traspaso / Reubicación ")
+    # Pestañas Modernas
+    self.notebook = ctk.CTkTabview(
+        self.root, 
+        fg_color="#0E1117", 
+        segmented_button_selected_color="#00D9F5", 
+        segmented_button_selected_hover_color="#00A0B5"
+    )
+    self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+    self.tab_escaneo_name = " 📦 Escaneo por Estante "
+    self.tab_traspaso_name = " 🔄 Traspaso / Reubicación "
+    
+    self.notebook.add(self.tab_escaneo_name)
+    self.notebook.add(self.tab_traspaso_name)
+
+    self.tab_escaneo = self.notebook.tab(self.tab_escaneo_name)
+    self.tab_traspaso = self.notebook.tab(self.tab_traspaso_name)
 
     self.setup_tab_escaneo()
     self.setup_tab_traspaso()
+    self.actualizar_barra_offline()
+
+  def configurar_estilo_tabla(self):
+    """Ajusta el Treeview (tabla) nativo para que combine con el tema oscuro moderno"""
+    style = ttk.Style()
+    style.theme_use("default")
+    style.configure(
+        "Treeview",
+        background="#262730",
+        foreground="white",
+        rowheight=35,
+        fieldbackground="#262730",
+        borderwidth=0,
+        font=("Arial", 10)
+    )
+    style.map('Treeview', background=[('selected', '#00D9F5')], foreground=[('selected', 'black')])
+    style.configure(
+        "Treeview.Heading",
+        background="#1E293B",
+        foreground="white",
+        relief="flat",
+        font=("Arial", 11, "bold"),
+        padding=5
+    )
+    style.map("Treeview.Heading", background=[('active', '#334155')])
+
+  # --- BARRA DE MODO OFFLINE ---
+  def setup_barra_offline(self):
+    frame_offline = ctk.CTkFrame(self.root, fg_color="#1E293B", corner_radius=0, height=50)
+    frame_offline.pack(fill="x", side="top")
+
+    self.lbl_estado_offline = ctk.CTkLabel(
+        frame_offline, text="🟢 En línea", font=("Arial", 14, "bold"), text_color="#39FF88"
+    )
+    self.lbl_estado_offline.pack(side="left", padx=20, pady=10)
+
+    self.btn_toggle_offline = ctk.CTkButton(
+        frame_offline, text="🔌 Activar Modo Offline", font=("Arial", 12, "bold"),
+        fg_color="#334155", hover_color="#475569", command=self.alternar_modo_offline
+    )
+    self.btn_toggle_offline.pack(side="left", padx=10)
+
+    self.btn_sincronizar = ctk.CTkButton(
+        frame_offline, text="☁️ Sincronizar (0)", font=("Arial", 12, "bold"),
+        fg_color="#00D9F5", text_color="black", hover_color="#00A0B5", command=self.sincronizar_pendientes
+    )
+    self.btn_sincronizar.pack(side="left", padx=10)
+
+  def alternar_modo_offline(self):
+    self.modo_offline = not self.modo_offline
+    self.actualizar_barra_offline()
+
+  def actualizar_barra_offline(self):
+    if self.modo_offline:
+      self.lbl_estado_offline.configure(text="🔴 Modo Offline activo", text_color="#EF4444")
+      self.btn_toggle_offline.configure(text="🔌 Desactivar Modo Offline")
+    else:
+      self.lbl_estado_offline.configure(text="🟢 En línea", text_color="#39FF88")
+      self.btn_toggle_offline.configure(text="🔌 Activar Modo Offline")
+
+    n = len(self.cola_pendiente)
+    self.btn_sincronizar.configure(text=f"☁️ Sincronizar ({n})")
+
+  def encolar_pendiente(self, accion, **datos):
+    evento = {"accion": accion, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **datos}
+    self.cola_pendiente.append(evento)
+    guardar_pendientes(self.cola_pendiente)
+    self.actualizar_barra_offline()
+
+  def sincronizar_pendientes(self):
+    if not self.cola_pendiente:
+      messagebox.showinfo("Sincronizar", "No hay escaneos pendientes por sincronizar.")
+      return
+
+    total = len(self.cola_pendiente)
+    exitosos = 0
+    restantes = []
+
+    for evento in self.cola_pendiente:
+      try:
+        if evento["accion"] == "guardar":
+          guardar_ubicacion(evento["codigo"], evento["ubicacion"], evento.get("cantidad", 1))
+        elif evento["accion"] == "restar":
+          restar_ubicacion(evento["codigo"], evento["ubicacion"], evento.get("cantidad", 1))
+        exitosos += 1
+      except Exception:
+        restantes.append(evento)
+
+    self.cola_pendiente = restantes
+    guardar_pendientes(self.cola_pendiente)
+    self.actualizar_barra_offline()
+
+    if exitosos == total:
+      messagebox.showinfo("Sincronizar", f"✅ Se sincronizaron los {exitosos} escaneos pendientes con éxito.")
+    else:
+      messagebox.showwarning("Sincronizar", f"Se sincronizaron {exitosos} de {total}. Los restantes siguen en la cola.")
 
   # --- PESTAÑA ESCANEO ---
   def setup_tab_escaneo(self):
@@ -148,101 +280,75 @@ class SistemaBodegaApp:
     self.contador_estante = 0
     self.historial_escaneos = []
 
-    frame_ub = tk.LabelFrame(
-        self.tab_escaneo,
-        text=" 1. Ubicación Actual ",
-        font=("Arial", 11, "bold"),
-    )
-    frame_ub.pack(fill="x", pady=5)
-    self.var_ubicacion = tk.StringVar()
+    # Bloque 1: Ubicación
+    frame_ub = ctk.CTkFrame(self.tab_escaneo, fg_color="#262730", corner_radius=10)
+    frame_ub.pack(fill="x", pady=10, padx=10)
+    
+    ctk.CTkLabel(frame_ub, text="1. Ubicación Actual", font=("Arial", 14, "bold"), text_color="#00D9F5").pack(anchor="w", padx=15, pady=(10, 0))
+    
+    self.var_ubicacion = ctk.StringVar()
     self.var_ubicacion.trace_add("write", self.al_cambiar_ubicacion_texto)
-    tk.Entry(
-        frame_ub,
-        textvariable=self.var_ubicacion,
-        font=("Arial", 15, "bold"),
-        bg="#E0F2FE",
-    ).pack(fill="x", padx=10, pady=5)
+    self.entry_ubicacion = ctk.CTkEntry(
+        frame_ub, textvariable=self.var_ubicacion, font=("Arial", 18, "bold"),
+        fg_color="#0E1117", border_color="#00D9F5", text_color="white", height=45
+    )
+    self.entry_ubicacion.pack(fill="x", padx=15, pady=(5, 15))
 
-    frame_scan = tk.LabelFrame(
-        self.tab_escaneo,
-        text=" 2. Disparo de Pistola ",
-        font=("Arial", 11, "bold"),
+    # Bloque 2: Disparo de Pistola
+    frame_scan = ctk.CTkFrame(self.tab_escaneo, fg_color="#262730", corner_radius=10)
+    frame_scan.pack(fill="x", pady=5, padx=10)
+    
+    ctk.CTkLabel(frame_scan, text="2. Disparo de Pistola", font=("Arial", 14, "bold"), text_color="#39FF88").pack(anchor="w", padx=15, pady=(10, 0))
+    
+    self.entry_scanner = ctk.CTkEntry(
+        frame_scan, font=("Arial", 22, "bold"), fg_color="#0E1117", 
+        border_color="#39FF88", text_color="white", height=55
     )
-    frame_scan.pack(fill="x", pady=5)
-    self.entry_scanner = tk.Entry(
-        frame_scan, font=("Arial", 18, "bold"), bg="#FEF08A"
-    )
-    self.entry_scanner.pack(fill="x", padx=10, pady=5)
+    self.entry_scanner.pack(fill="x", padx=15, pady=(5, 15))
     self.entry_scanner.bind("<Return>", self.procesar_disparo_escaneo)
     self.root.bind("<Control-z>", lambda event: self.deshacer_ultimo_escaneo())
 
-    frame_acciones = tk.Frame(self.tab_escaneo)
-    frame_acciones.pack(fill="x", pady=5)
+    # Bloque 3: Acciones y Estatus
+    frame_acciones = ctk.CTkFrame(self.tab_escaneo, fg_color="transparent")
+    frame_acciones.pack(fill="x", pady=10, padx=10)
 
-    btn_undo = tk.Button(
-        frame_acciones,
-        text="↩️ Deshacer Último Escaneo (Ctrl+Z)",
-        font=("Arial", 10, "bold"),
-        bg="#F59E0B",
-        fg="white",
-        padx=10,
-        pady=5,
-        command=self.deshacer_ultimo_escaneo,
+    btn_undo = ctk.CTkButton(
+        frame_acciones, text="↩️ Deshacer Último (Ctrl+Z)", font=("Arial", 12, "bold"),
+        fg_color="#F59E0B", hover_color="#D97706", text_color="white", command=self.deshacer_ultimo_escaneo
     )
     btn_undo.pack(side="left", padx=5)
 
-    btn_del_sel = tk.Button(
-        frame_acciones,
-        text="🗑️ Restar Pieza Seleccionada de la Tabla",
-        font=("Arial", 10, "bold"),
-        bg="#EF4444",
-        fg="white",
-        padx=10,
-        pady=5,
-        command=self.restar_seleccionado,
+    btn_del_sel = ctk.CTkButton(
+        frame_acciones, text="🗑️ Restar Seleccionada", font=("Arial", 12, "bold"),
+        fg_color="#EF4444", hover_color="#B91C1C", text_color="white", command=self.restar_seleccionado
     )
     btn_del_sel.pack(side="left", padx=5)
 
-    self.lbl_status = tk.Label(
-        self.tab_escaneo,
-        text="Listo para escanear.",
-        font=("Arial", 12, "bold"),
-        fg="#1E3A8A",
+    self.lbl_status = ctk.CTkLabel(
+        self.tab_escaneo, text="Listo para escanear.", font=("Arial", 14, "bold"), text_color="#94A3B8"
     )
-    self.lbl_status.pack(fill="x", pady=2)
-    self.lbl_contador = tk.Label(
-        self.tab_escaneo,
-        text="Piezas contadas en este estante: 0",
-        font=("Arial", 11, "bold"),
-        fg="#0369A1",
+    self.lbl_status.pack(fill="x", pady=5)
+    
+    self.lbl_contador = ctk.CTkLabel(
+        self.tab_escaneo, text="Piezas contadas en este estante: 0", font=("Arial", 14, "bold"), text_color="#00D9F5"
     )
     self.lbl_contador.pack(fill="x")
 
+    # Tabla
     self.tree_escaneo = ttk.Treeview(
-        self.tab_escaneo,
-        columns=("codigo", "desc", "talla", "ub", "cant"),
-        show="headings",
-        height=10,
+        self.tab_escaneo, columns=("codigo", "desc", "talla", "ub", "cant"), show="headings", height=10
     )
-    for col, head, w in [
-        ("codigo", "Código", 140),
-        ("desc", "Descripción", 360),
-        ("talla", "Talla", 80),
-        ("ub", "Ubicación", 100),
-        ("cant", "Piezas", 100),
-    ]:
+    for col, head, w in [("codigo", "Código", 140), ("desc", "Descripción", 360), ("talla", "Talla", 80), ("ub", "Ubicación", 100), ("cant", "Piezas", 100)]:
       self.tree_escaneo.heading(col, text=head)
       self.tree_escaneo.column(col, width=w)
-    self.tree_escaneo.pack(fill="both", expand=True, pady=5)
+    self.tree_escaneo.pack(fill="both", expand=True, pady=10, padx=10)
 
   def al_cambiar_ubicacion_texto(self, *args):
     nueva_ub = self.var_ubicacion.get().strip().upper()
     if nueva_ub != self.ubicacion_actual:
       self.ubicacion_actual = nueva_ub
       self.contador_estante = 0
-      self.lbl_contador.config(
-          text=f"Piezas contadas en {nueva_ub or 'estante'}: 0"
-      )
+      self.lbl_contador.configure(text=f"Piezas contadas en {nueva_ub or 'estante'}: 0")
 
   def procesar_disparo_escaneo(self, event):
     codigo_raw = self.entry_scanner.get()
@@ -253,7 +359,6 @@ class SistemaBodegaApp:
     if not ubicacion or not codigo:
       return
 
-    cant = guardar_ubicacion(codigo, ubicacion)
     self.contador_estante += 1
     self.historial_escaneos.append((codigo, ubicacion))
 
@@ -261,47 +366,37 @@ class SistemaBodegaApp:
     if not self.df_inv.empty:
       match = self.df_inv[self.df_inv["CodigoLimpio"] == codigo]
       if not match.empty:
-        desc, talla = str(match.iloc[0]["Descripcion"]), str(
-            match.iloc[0]["Talla"]
-        )
+        desc, talla = str(match.iloc[0]["Descripcion"]), str(match.iloc[0]["Talla"])
 
-    self.lbl_status.config(
-        text=f"✅ REGISTRADO: {codigo} ({talla}) en '{ubicacion}'", fg="green"
-    )
-    self.lbl_contador.config(
-        text=f"Piezas contadas en {ubicacion}: {self.contador_estante}"
-    )
-    self.tree_escaneo.insert(
-        "", 0, values=(codigo, desc, talla, ubicacion, f"{cant} pza(s)")
-    )
+    if self.modo_offline:
+      self.encolar_pendiente("guardar", codigo=codigo, ubicacion=ubicacion, cantidad=1)
+      texto_cantidad = "Pendiente"
+      self.lbl_status.configure(text=f"🔌 REGISTRADO (offline): {codigo} ({talla}) en '{ubicacion}'", text_color="#F59E0B")
+    else:
+      cant = guardar_ubicacion(codigo, ubicacion)
+      texto_cantidad = f"{cant} pza(s)"
+      self.lbl_status.configure(text=f"✅ REGISTRADO: {codigo} ({talla}) en '{ubicacion}'", text_color="#39FF88")
+
+    self.lbl_contador.configure(text=f"Piezas contadas en {ubicacion}: {self.contador_estante}")
+    self.tree_escaneo.insert("", 0, values=(codigo, desc, talla, ubicacion, texto_cantidad))
 
   def deshacer_ultimo_escaneo(self):
     if not self.historial_escaneos:
-      self.lbl_status.config(
-          text="⚠️ No hay escaneos recientes para deshacer.", fg="red"
-      )
+      self.lbl_status.configure(text="⚠️ No hay escaneos recientes para deshacer.", text_color="#EF4444")
       return
 
     codigo, ubicacion = self.historial_escaneos.pop()
-    nueva_cant = restar_ubicacion(codigo, ubicacion)
-
     if self.contador_estante > 0 and ubicacion == self.ubicacion_actual:
       self.contador_estante -= 1
 
-    self.lbl_status.config(
-        text=(
-            f"↩️ DESHECHO: Código {codigo} en '{ubicacion}' (Quedan:"
-            f" {nueva_cant} pzas)"
-        ),
-        fg="#D97706",
-    )
-    self.lbl_contador.config(
-        text=(
-            f"Piezas contadas en {self.ubicacion_actual or 'estante'}:"
-            f" {self.contador_estante}"
-        )
-    )
+    if self.modo_offline:
+      self.encolar_pendiente("restar", codigo=codigo, ubicacion=ubicacion, cantidad=1)
+      self.lbl_status.configure(text=f"🔌 DESHECHO (offline): Código {codigo} en '{ubicacion}'", text_color="#F59E0B")
+    else:
+      nueva_cant = restar_ubicacion(codigo, ubicacion)
+      self.lbl_status.configure(text=f"↩️ DESHECHO: Código {codigo} en '{ubicacion}' (Quedan: {nueva_cant} pzas)", text_color="#F59E0B")
 
+    self.lbl_contador.configure(text=f"Piezas contadas en {self.ubicacion_actual or 'estante'}: {self.contador_estante}")
     items = self.tree_escaneo.get_children()
     if items:
       self.tree_escaneo.delete(items[0])
@@ -309,110 +404,62 @@ class SistemaBodegaApp:
   def restar_seleccionado(self):
     selected_item = self.tree_escaneo.selection()
     if not selected_item:
-      messagebox.showwarning(
-          "Atención", "Selecciona una fila de la tabla para restar una pieza."
-      )
+      messagebox.showwarning("Atención", "Selecciona una fila de la tabla para restar una pieza.")
       return
 
     item_vals = self.tree_escaneo.item(selected_item[0], "values")
     codigo = item_vals[0]
     ubicacion = item_vals[3]
 
-    nueva_cant = restar_ubicacion(codigo, ubicacion)
-
     if self.contador_estante > 0 and ubicacion == self.ubicacion_actual:
       self.contador_estante -= 1
 
-    self.lbl_status.config(
-        text=(
-            f"🗑️ Se restó 1 pieza de {codigo} en '{ubicacion}' (Quedan:"
-            f" {nueva_cant} pzas)"
-        ),
-        fg="red",
-    )
-    self.lbl_contador.config(
-        text=(
-            f"Piezas contadas en {self.ubicacion_actual or 'estante'}:"
-            f" {self.contador_estante}"
-        )
-    )
+    if self.modo_offline:
+      self.encolar_pendiente("restar", codigo=codigo, ubicacion=ubicacion, cantidad=1)
+      self.lbl_status.configure(text=f"🔌 Se restó 1 pieza de {codigo} en '{ubicacion}' (offline)", text_color="#F59E0B")
+      self.lbl_contador.configure(text=f"Piezas contadas en {self.ubicacion_actual or 'estante'}: {self.contador_estante}")
+      self.tree_escaneo.item(selected_item[0], values=(item_vals[0], item_vals[1], item_vals[2], item_vals[3], "Resta pendiente"))
+      return
+
+    nueva_cant = restar_ubicacion(codigo, ubicacion)
+    self.lbl_status.configure(text=f"🗑️ Se restó 1 pieza de {codigo} en '{ubicacion}' (Quedan: {nueva_cant} pzas)", text_color="#EF4444")
+    self.lbl_contador.configure(text=f"Piezas contadas en {self.ubicacion_actual or 'estante'}: {self.contador_estante}")
 
     if nueva_cant > 0:
-      self.tree_escaneo.item(
-          selected_item[0],
-          values=(
-              item_vals[0],
-              item_vals[1],
-              item_vals[2],
-              item_vals[3],
-              f"{nueva_cant} pza(s)",
-          ),
-      )
+      self.tree_escaneo.item(selected_item[0], values=(item_vals[0], item_vals[1], item_vals[2], item_vals[3], f"{nueva_cant} pza(s)"))
     else:
       self.tree_escaneo.delete(selected_item[0])
 
   # --- PESTAÑA TRASPASO ---
   def setup_tab_traspaso(self):
-    frame_orig = tk.LabelFrame(
-        self.tab_traspaso,
-        text=" Ubicación ORIGEN (De donde SALE) ",
-        font=("Arial", 11, "bold"),
-    )
-    frame_orig.pack(fill="x", pady=5)
-    self.entry_orig = tk.Entry(
-        frame_orig, font=("Arial", 14, "bold"), bg="#FEE2E2"
-    )
+    frame_orig = ctk.CTkFrame(self.tab_traspaso, fg_color="#262730", corner_radius=10)
+    frame_orig.pack(fill="x", pady=10, padx=10)
+    ctk.CTkLabel(frame_orig, text="Ubicación ORIGEN (De donde SALE)", font=("Arial", 14, "bold"), text_color="#EF4444").pack(anchor="w", padx=15, pady=(10, 0))
+    self.entry_orig = ctk.CTkEntry(frame_orig, font=("Arial", 18, "bold"), fg_color="#0E1117", border_color="#EF4444", text_color="white", height=45)
     self.entry_orig.insert(0, "PISO")
-    self.entry_orig.pack(fill="x", padx=10, pady=5)
+    self.entry_orig.pack(fill="x", padx=15, pady=(5, 15))
 
-    frame_dest = tk.LabelFrame(
-        self.tab_traspaso,
-        text=" Ubicación DESTINO (A donde ENTRA) ",
-        font=("Arial", 11, "bold"),
-    )
-    frame_dest.pack(fill="x", pady=5)
-    self.entry_dest = tk.Entry(
-        frame_dest, font=("Arial", 14, "bold"), bg="#DCFCE7"
-    )
-    self.entry_dest.pack(fill="x", padx=10, pady=5)
+    frame_dest = ctk.CTkFrame(self.tab_traspaso, fg_color="#262730", corner_radius=10)
+    frame_dest.pack(fill="x", pady=10, padx=10)
+    ctk.CTkLabel(frame_dest, text="Ubicación DESTINO (A donde ENTRA)", font=("Arial", 14, "bold"), text_color="#39FF88").pack(anchor="w", padx=15, pady=(10, 0))
+    self.entry_dest = ctk.CTkEntry(frame_dest, font=("Arial", 18, "bold"), fg_color="#0E1117", border_color="#39FF88", text_color="white", height=45)
+    self.entry_dest.pack(fill="x", padx=15, pady=(5, 15))
 
-    frame_scan_t = tk.LabelFrame(
-        self.tab_traspaso,
-        text=" Disparar producto a mover ",
-        font=("Arial", 11, "bold"),
-    )
-    frame_scan_t.pack(fill="x", pady=5)
-    self.entry_scan_traspaso = tk.Entry(
-        frame_scan_t, font=("Arial", 18, "bold"), bg="#FEF08A"
-    )
-    self.entry_scan_traspaso.pack(fill="x", padx=10, pady=5)
-    self.entry_scan_traspaso.bind(
-        "<Return>", self.procesar_disparo_traspaso
-    )
+    frame_scan_t = ctk.CTkFrame(self.tab_traspaso, fg_color="#262730", corner_radius=10)
+    frame_scan_t.pack(fill="x", pady=10, padx=10)
+    ctk.CTkLabel(frame_scan_t, text="Disparar producto a mover", font=("Arial", 14, "bold"), text_color="#00D9F5").pack(anchor="w", padx=15, pady=(10, 0))
+    self.entry_scan_traspaso = ctk.CTkEntry(frame_scan_t, font=("Arial", 22, "bold"), fg_color="#0E1117", border_color="#00D9F5", text_color="white", height=55)
+    self.entry_scan_traspaso.pack(fill="x", padx=15, pady=(5, 15))
+    self.entry_scan_traspaso.bind("<Return>", self.procesar_disparo_traspaso)
 
-    self.lbl_status_t = tk.Label(
-        self.tab_traspaso,
-        text="Escribe Origen y Destino, luego escanea.",
-        font=("Arial", 12, "bold"),
-        fg="#1E3A8A",
-    )
+    self.lbl_status_t = ctk.CTkLabel(self.tab_traspaso, text="Escribe Origen y Destino, luego escanea.", font=("Arial", 14, "bold"), text_color="#94A3B8")
     self.lbl_status_t.pack(fill="x", pady=5)
 
-    self.tree_traspaso = ttk.Treeview(
-        self.tab_traspaso,
-        columns=("codigo", "desc", "orig", "dest"),
-        show="headings",
-        height=10,
-    )
-    for col, head, w in [
-        ("codigo", "Código", 150),
-        ("desc", "Descripción", 400),
-        ("orig", "Origen", 120),
-        ("dest", "Destino", 120),
-    ]:
+    self.tree_traspaso = ttk.Treeview(self.tab_traspaso, columns=("codigo", "desc", "orig", "dest"), show="headings", height=10)
+    for col, head, w in [("codigo", "Código", 150), ("desc", "Descripción", 400), ("orig", "Origen", 120), ("dest", "Destino", 120)]:
       self.tree_traspaso.heading(col, text=head)
       self.tree_traspaso.column(col, width=w)
-    self.tree_traspaso.pack(fill="both", expand=True, pady=5)
+    self.tree_traspaso.pack(fill="both", expand=True, pady=10, padx=10)
 
   def procesar_disparo_traspaso(self, event):
     codigo = limpiar_codigo(self.entry_scan_traspaso.get())
@@ -421,13 +468,8 @@ class SistemaBodegaApp:
     destino = self.entry_dest.get().strip().upper()
 
     if not origen or not destino or not codigo:
-      self.lbl_status_t.config(
-          text="⚠️ Define Origen y Destino correctamente.", fg="red"
-      )
+      self.lbl_status_t.configure(text="⚠️ Define Origen y Destino correctamente.", text_color="#EF4444")
       return
-
-    cant_orig = restar_ubicacion(codigo, origen, cantidad=1)
-    cant_dest = guardar_ubicacion(codigo, destino, cantidad=1)
 
     desc = "Sin catálogo"
     if not self.df_inv.empty:
@@ -435,16 +477,19 @@ class SistemaBodegaApp:
       if not match.empty:
         desc = str(match.iloc[0]["Descripcion"])
 
-    self.lbl_status_t.config(
-        text=(
-            f"🔄 MOVIDO: {codigo} de {origen} ({cant_orig} queda) ➡️ {destino}"
-            f" ({cant_dest} total)"
-        ),
-        fg="blue",
-    )
+    if self.modo_offline:
+      self.encolar_pendiente("restar", codigo=codigo, ubicacion=origen, cantidad=1)
+      self.encolar_pendiente("guardar", codigo=codigo, ubicacion=destino, cantidad=1)
+      self.lbl_status_t.configure(text=f"🔌 MOVIDO (offline): {codigo} de {origen} ➡️ {destino}", text_color="#F59E0B")
+    else:
+      cant_orig = restar_ubicacion(codigo, origen, cantidad=1)
+      cant_dest = guardar_ubicacion(codigo, destino, cantidad=1)
+      self.lbl_status_t.configure(text=f"🔄 MOVIDO: {codigo} de {origen} ({cant_orig} queda) ➡️ {destino} ({cant_dest} total)", text_color="#00D9F5")
+
     self.tree_traspaso.insert("", 0, values=(codigo, desc, origen, destino))
 
+
 if __name__ == "__main__":
-  root = tk.Tk()
+  root = ctk.CTk()  # Arrancamos con la base de la nueva librería
   app = SistemaBodegaApp(root)
   root.mainloop()
