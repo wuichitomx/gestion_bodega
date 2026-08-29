@@ -4,7 +4,7 @@ import sys
 import json
 import tkinter as tk
 from tkinter import messagebox, ttk
-import customtkinter as ctk  # <-- NUEVA LIBRERÍA MODERNIZADA
+import customtkinter as ctk
 import pandas as pd
 from supabase import create_client
 from dotenv import load_dotenv
@@ -136,6 +136,52 @@ def restar_ubicacion(codigo, ubicacion, cantidad=1):
     messagebox.showerror("Error en Supabase", f"No se pudo restar.\nDetalle técnico:\n\n{str(e)}")
     return 0
 
+def mover_ubicacion_completa(origen, destino):
+  """Mueve todo el inventario de una ubicación origen a una ubicación destino, 
+  sobrescribiendo por completo el destino (borrando lo que había antes en él)."""
+  origen = origen.upper().strip()
+  destino = destino.upper().strip()
+  
+  if not origen or not destino:
+    return 0, "Define la ubicación de origen y destino."
+  
+  if origen == destino:
+    return 0, "El origen y el destino no pueden ser iguales."
+
+  try:
+    # 1. Borramos todo lo que existía previamente en el DESTINO para sobrescribirlo
+    supabase.table("ubicaciones").delete().eq("ubicacion", destino).execute()
+
+    # 2. Consultar todos los registros que están en la ubicación origen
+    res = supabase.table("ubicaciones").select("codigo_limpio, cantidad").eq("ubicacion", origen).execute()
+    
+    if not res.data or len(res.data) == 0:
+      return 0, f"No se encontraron productos en la ubicación origen '{origen}'."
+    
+    movidos = 0
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    for item in res.data:
+      codigo = item["codigo_limpio"]
+      cantidad_a_mover = item["cantidad"]
+
+      # 3. Insertar el producto con su cantidad directamente en el destino limpio
+      supabase.table("ubicaciones").insert({
+          "codigo_limpio": codigo,
+          "ubicacion": destino,
+          "cantidad": cantidad_a_mover,
+          "fecha": fecha_actual
+      }).execute()
+
+      # 4. Eliminar el registro de la ubicación origen original
+      supabase.table("ubicaciones").delete().eq("codigo_limpio", codigo).eq("ubicacion", origen).execute()
+      movidos += 1
+
+    return movidos, f"¡Éxito! Ubicación sobrescrita. Se pasaron {movidos} registros de '{origen}' a '{destino}'."
+  
+  except Exception as e:
+    return 0, f"Error en Supabase al sobrescribir ubicación: {str(e)}"
+
 
 # --- INTERFAZ GRÁFICA MODERNA (CustomTkinter) ---
 class SistemaBodegaApp:
@@ -144,13 +190,11 @@ class SistemaBodegaApp:
     self.root.title("⚡ Sinapsis - Inventario y Bodega")
     self.root.geometry("1050x780")
     
-    # Configuración base del tema oscuro estilo Streamlit
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
 
     self.df_inv = cargar_inventario()
 
-    # Variables de Estado Offline
     self.modo_offline = False
     self.cola_pendiente = cargar_pendientes()
 
@@ -168,19 +212,22 @@ class SistemaBodegaApp:
 
     self.tab_escaneo_name = " 📦 Escaneo por Estante "
     self.tab_traspaso_name = " 🔄 Traspaso / Reubicación "
+    self.tab_masivo_name = " 🚚 Mover Ubicación Completa "
     
     self.notebook.add(self.tab_escaneo_name)
     self.notebook.add(self.tab_traspaso_name)
+    self.notebook.add(self.tab_masivo_name)
 
     self.tab_escaneo = self.notebook.tab(self.tab_escaneo_name)
     self.tab_traspaso = self.notebook.tab(self.tab_traspaso_name)
+    self.tab_masivo = self.notebook.tab(self.tab_masivo_name)
 
     self.setup_tab_escaneo()
     self.setup_tab_traspaso()
+    self.setup_tab_masivo()
     self.actualizar_barra_offline()
 
   def configurar_estilo_tabla(self):
-    """Ajusta el Treeview (tabla) nativo para que combine con el tema oscuro moderno"""
     style = ttk.Style()
     style.theme_use("default")
     style.configure(
@@ -203,7 +250,6 @@ class SistemaBodegaApp:
     )
     style.map("Treeview.Heading", background=[('active', '#334155')])
 
-  # --- BARRA DE MODO OFFLINE ---
   def setup_barra_offline(self):
     frame_offline = ctk.CTkFrame(self.root, fg_color="#1E293B", corner_radius=0, height=50)
     frame_offline.pack(fill="x", side="top")
@@ -280,12 +326,9 @@ class SistemaBodegaApp:
     self.contador_estante = 0
     self.historial_escaneos = []
 
-    # Bloque 1: Ubicación
     frame_ub = ctk.CTkFrame(self.tab_escaneo, fg_color="#262730", corner_radius=10)
     frame_ub.pack(fill="x", pady=10, padx=10)
-    
     ctk.CTkLabel(frame_ub, text="1. Ubicación Actual", font=("Arial", 14, "bold"), text_color="#00D9F5").pack(anchor="w", padx=15, pady=(10, 0))
-    
     self.var_ubicacion = ctk.StringVar()
     self.var_ubicacion.trace_add("write", self.al_cambiar_ubicacion_texto)
     self.entry_ubicacion = ctk.CTkEntry(
@@ -294,12 +337,9 @@ class SistemaBodegaApp:
     )
     self.entry_ubicacion.pack(fill="x", padx=15, pady=(5, 15))
 
-    # Bloque 2: Disparo de Pistola
     frame_scan = ctk.CTkFrame(self.tab_escaneo, fg_color="#262730", corner_radius=10)
     frame_scan.pack(fill="x", pady=5, padx=10)
-    
     ctk.CTkLabel(frame_scan, text="2. Disparo de Pistola", font=("Arial", 14, "bold"), text_color="#39FF88").pack(anchor="w", padx=15, pady=(10, 0))
-    
     self.entry_scanner = ctk.CTkEntry(
         frame_scan, font=("Arial", 22, "bold"), fg_color="#0E1117", 
         border_color="#39FF88", text_color="white", height=55
@@ -308,7 +348,6 @@ class SistemaBodegaApp:
     self.entry_scanner.bind("<Return>", self.procesar_disparo_escaneo)
     self.root.bind("<Control-z>", lambda event: self.deshacer_ultimo_escaneo())
 
-    # Bloque 3: Acciones y Estatus
     frame_acciones = ctk.CTkFrame(self.tab_escaneo, fg_color="transparent")
     frame_acciones.pack(fill="x", pady=10, padx=10)
 
@@ -334,7 +373,6 @@ class SistemaBodegaApp:
     )
     self.lbl_contador.pack(fill="x")
 
-    # Tabla
     self.tree_escaneo = ttk.Treeview(
         self.tab_escaneo, columns=("codigo", "desc", "talla", "ub", "cant"), show="headings", height=10
     )
@@ -488,8 +526,75 @@ class SistemaBodegaApp:
 
     self.tree_traspaso.insert("", 0, values=(codigo, desc, origen, destino))
 
+  # --- PESTAÑA: MOVER UBICACIÓN COMPLETA (MASIVO CON SOBRESCRITURA) ---
+  def setup_tab_masivo(self):
+    frame_instruccion = ctk.CTkFrame(self.tab_masivo, fg_color="#262730", corner_radius=10)
+    frame_instruccion.pack(fill="x", pady=10, padx=10)
+    ctk.CTkLabel(
+        frame_instruccion, 
+        text="⚠️ Reubicación Masiva de Estantes: Mueve TODO el inventario sobrescribiendo por completo el destino.", 
+        font=("Arial", 12, "bold"), text_color="#F59E0B"
+    ).pack(padx=15, pady=10)
+
+    frame_inputs = ctk.CTkFrame(self.tab_masivo, fg_color="transparent")
+    frame_inputs.pack(fill="x", pady=5, padx=10)
+
+    frame_mo = ctk.CTkFrame(frame_inputs, fg_color="#262730", corner_radius=10)
+    frame_mo.pack(side="left", fill="both", expand=True, padx=(0, 5))
+    ctk.CTkLabel(frame_mo, text="Ubicación ORIGEN (A vaciar)", font=("Arial", 13, "bold"), text_color="#EF4444").pack(anchor="w", padx=15, pady=(10, 0))
+    self.entry_masivo_orig = ctk.CTkEntry(frame_mo, font=("Arial", 16, "bold"), fg_color="#0E1117", border_color="#EF4444", text_color="white", height=40)
+    self.entry_masivo_orig.pack(fill="x", padx=15, pady=(5, 15))
+
+    frame_md = ctk.CTkFrame(frame_inputs, fg_color="#262730", corner_radius=10)
+    frame_md.pack(side="right", fill="both", expand=True, padx=(5, 0))
+    ctk.CTkLabel(frame_md, text="Ubicación DESTINO (A sobrescribir)", font=("Arial", 13, "bold"), text_color="#39FF88").pack(anchor="w", padx=15, pady=(10, 0))
+    self.entry_masivo_dest = ctk.CTkEntry(frame_md, font=("Arial", 16, "bold"), fg_color="#0E1117", border_color="#39FF88", text_color="white", height=40)
+    self.entry_masivo_dest.pack(fill="x", padx=15, pady=(5, 15))
+
+    self.btn_ejecutar_masivo = ctk.CTkButton(
+        self.tab_masivo, text="🚀 SOBRESCRIBIR Y MOVER UBICACIÓN COMPLETA", font=("Arial", 14, "bold"),
+        fg_color="#00D9F5", text_color="black", hover_color="#00A0B5", height=50,
+        command=self.ejecutar_movimiento_masivo
+    )
+    self.btn_ejecutar_masivo.pack(fill="x", pady=15, padx=10)
+
+    self.lbl_status_masivo = ctk.CTkLabel(
+        self.tab_masivo, text="Escribe origen y destino, luego presiona ejecutar.", font=("Arial", 13, "bold"), text_color="#94A3B8"
+    )
+    self.lbl_status_masivo.pack(fill="x", pady=5)
+
+  def ejecutar_movimiento_masivo(self):
+    origen = self.entry_masivo_orig.get().strip().upper()
+    destino = self.entry_masivo_dest.get().strip().upper()
+
+    if not origen or not destino:
+      messagebox.showwarning("Atención", "Debes especificar la ubicación de Origen y la de Destino.")
+      return
+
+    confirmar = messagebox.askyesno(
+        "Confirmar Traspaso Masivo",
+        f"¿Estás completamente seguro de mover TODO el inventario de '{origen}' hacia '{destino}'?\n\n⚠️ ADVERTENCIA: Esto BORRARÁ lo que había previamente en '{destino}' y dejará únicamente lo del origen."
+    )
+
+    if not confirmar:
+      return
+
+    self.lbl_status_masivo.configure(text="⏳ Procesando sobrescritura masiva en Supabase...", text_color="#F59E0B")
+    self.root.update()
+
+    movidos, mensaje = mover_ubicacion_completa(origen, destino)
+
+    if movidos > 0:
+      self.lbl_status_masivo.configure(text=f"✅ {mensaje}", text_color="#39FF88")
+      messagebox.showinfo("Éxito", mensaje)
+      self.entry_masivo_orig.delete(0, tk.END)
+      self.entry_masivo_dest.delete(0, tk.END)
+    else:
+      self.lbl_status_masivo.configure(text=f"❌ {mensaje}", text_color="#EF4444")
+      messagebox.showerror("Aviso", mensaje)
+
 
 if __name__ == "__main__":
-  root = ctk.CTk()  # Arrancamos con la base de la nueva librería
+  root = ctk.CTk()
   app = SistemaBodegaApp(root)
   root.mainloop()
