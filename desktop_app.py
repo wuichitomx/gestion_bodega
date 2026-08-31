@@ -4,7 +4,7 @@ import sys
 import json
 import tkinter as tk
 from tkinter import messagebox, ttk
-import customtkinter as ctk  # <-- NUEVA LIBRERÍA MODERNIZADA
+import customtkinter as ctk
 import pandas as pd
 from supabase import create_client
 from dotenv import load_dotenv
@@ -136,6 +136,63 @@ def restar_ubicacion(codigo, ubicacion, cantidad=1):
     messagebox.showerror("Error en Supabase", f"No se pudo restar.\nDetalle técnico:\n\n{str(e)}")
     return 0
 
+def mover_ubicacion_completa(origen, destino):
+  origen = origen.upper().strip()
+  destino = destino.upper().strip()
+  
+  if not origen or not destino:
+    return 0, "Define la ubicación de origen y destino."
+  
+  if origen == destino:
+    return 0, "El origen y el destino no pueden ser iguales."
+
+  try:
+    # 1. Borramos todo lo que existía previamente en el DESTINO
+    supabase.table("ubicaciones").delete().eq("ubicacion", destino).execute()
+
+    # 2. Consultar todos los registros origen
+    res = supabase.table("ubicaciones").select("codigo_limpio, cantidad").eq("ubicacion", origen).execute()
+    
+    if not res.data or len(res.data) == 0:
+      return 0, f"No se encontraron productos en la ubicación origen '{origen}'."
+    
+    movidos = 0
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    for item in res.data:
+      codigo = item["codigo_limpio"]
+      cantidad_a_mover = item["cantidad"]
+
+      # 3. Insertar el producto en el destino
+      supabase.table("ubicaciones").insert({
+          "codigo_limpio": codigo,
+          "ubicacion": destino,
+          "cantidad": cantidad_a_mover,
+          "fecha": fecha_actual
+      }).execute()
+
+      # 4. Eliminar del origen
+      supabase.table("ubicaciones").delete().eq("codigo_limpio", codigo).eq("ubicacion", origen).execute()
+      movidos += 1
+
+    return movidos, f"¡Éxito! Ubicación sobrescrita. Se pasaron {movidos} registros de '{origen}' a '{destino}'."
+  except Exception as e:
+    return 0, f"Error en Supabase al sobrescribir ubicación: {str(e)}"
+
+def vaciar_ubicacion_completa(ubicacion):
+    ubicacion = ubicacion.upper().strip()
+    if not ubicacion:
+        return False, "Debes definir una ubicación para vaciar."
+    
+    try:
+        res = supabase.table("ubicaciones").select("cantidad").eq("ubicacion", ubicacion).execute()
+        if not res.data or len(res.data) == 0:
+            return False, f"La ubicación '{ubicacion}' ya está vacía o no existe."
+            
+        supabase.table("ubicaciones").delete().eq("ubicacion", ubicacion).execute()
+        return True, f"¡Éxito! La ubicación '{ubicacion}' ha sido vaciada por completo."
+    except Exception as e:
+        return False, f"Error al intentar vaciar en Supabase: {str(e)}"
 
 # --- INTERFAZ GRÁFICA MODERNA (CustomTkinter) ---
 class SistemaBodegaApp:
@@ -144,20 +201,17 @@ class SistemaBodegaApp:
     self.root.title("⚡ Sinapsis - Inventario y Bodega")
     self.root.geometry("1050x780")
     
-    # Configuración base del tema oscuro estilo Streamlit
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
 
     self.df_inv = cargar_inventario()
 
-    # Variables de Estado Offline
     self.modo_offline = False
     self.cola_pendiente = cargar_pendientes()
 
     self.configurar_estilo_tabla()
     self.setup_barra_offline()
 
-    # Pestañas Modernas
     self.notebook = ctk.CTkTabview(
         self.root, 
         fg_color="#0E1117", 
@@ -168,19 +222,22 @@ class SistemaBodegaApp:
 
     self.tab_escaneo_name = " 📦 Escaneo por Estante "
     self.tab_traspaso_name = " 🔄 Traspaso / Reubicación "
+    self.tab_masivo_name = " 🚚 Movimientos Masivos "
     
     self.notebook.add(self.tab_escaneo_name)
     self.notebook.add(self.tab_traspaso_name)
+    self.notebook.add(self.tab_masivo_name)
 
     self.tab_escaneo = self.notebook.tab(self.tab_escaneo_name)
     self.tab_traspaso = self.notebook.tab(self.tab_traspaso_name)
+    self.tab_masivo = self.notebook.tab(self.tab_masivo_name)
 
     self.setup_tab_escaneo()
     self.setup_tab_traspaso()
+    self.setup_tab_masivo()
     self.actualizar_barra_offline()
 
   def configurar_estilo_tabla(self):
-    """Ajusta el Treeview (tabla) nativo para que combine con el tema oscuro moderno"""
     style = ttk.Style()
     style.theme_use("default")
     style.configure(
@@ -203,7 +260,6 @@ class SistemaBodegaApp:
     )
     style.map("Treeview.Heading", background=[('active', '#334155')])
 
-  # --- BARRA DE MODO OFFLINE ---
   def setup_barra_offline(self):
     frame_offline = ctk.CTkFrame(self.root, fg_color="#1E293B", corner_radius=0, height=50)
     frame_offline.pack(fill="x", side="top")
@@ -250,11 +306,9 @@ class SistemaBodegaApp:
     if not self.cola_pendiente:
       messagebox.showinfo("Sincronizar", "No hay escaneos pendientes por sincronizar.")
       return
-
     total = len(self.cola_pendiente)
     exitosos = 0
     restantes = []
-
     for evento in self.cola_pendiente:
       try:
         if evento["accion"] == "guardar":
@@ -264,11 +318,9 @@ class SistemaBodegaApp:
         exitosos += 1
       except Exception:
         restantes.append(evento)
-
     self.cola_pendiente = restantes
     guardar_pendientes(self.cola_pendiente)
     self.actualizar_barra_offline()
-
     if exitosos == total:
       messagebox.showinfo("Sincronizar", f"✅ Se sincronizaron los {exitosos} escaneos pendientes con éxito.")
     else:
@@ -280,26 +332,37 @@ class SistemaBodegaApp:
     self.contador_estante = 0
     self.historial_escaneos = []
 
-    # Bloque 1: Ubicación
     frame_ub = ctk.CTkFrame(self.tab_escaneo, fg_color="#262730", corner_radius=10)
     frame_ub.pack(fill="x", pady=10, padx=10)
     
-    ctk.CTkLabel(frame_ub, text="1. Ubicación Actual", font=("Arial", 14, "bold"), text_color="#00D9F5").pack(anchor="w", padx=15, pady=(10, 0))
+    frame_cols = ctk.CTkFrame(frame_ub, fg_color="transparent")
+    frame_cols.pack(fill="x", padx=15, pady=10)
     
+    f_izq = ctk.CTkFrame(frame_cols, fg_color="transparent")
+    f_izq.pack(side="left", fill="x", expand=True, padx=(0, 5))
+    ctk.CTkLabel(f_izq, text="1. Ubicación (Ej. PV o C3A)", font=("Arial", 14, "bold"), text_color="#00D9F5").pack(anchor="w")
     self.var_ubicacion = ctk.StringVar()
     self.var_ubicacion.trace_add("write", self.al_cambiar_ubicacion_texto)
     self.entry_ubicacion = ctk.CTkEntry(
-        frame_ub, textvariable=self.var_ubicacion, font=("Arial", 18, "bold"),
+        f_izq, textvariable=self.var_ubicacion, font=("Arial", 18, "bold"),
         fg_color="#0E1117", border_color="#00D9F5", text_color="white", height=45
     )
-    self.entry_ubicacion.pack(fill="x", padx=15, pady=(5, 15))
+    self.entry_ubicacion.pack(fill="x", pady=(5, 0))
 
-    # Bloque 2: Disparo de Pistola
+    f_der = ctk.CTkFrame(frame_cols, fg_color="transparent")
+    f_der.pack(side="right", fill="x", expand=True, padx=(5, 0))
+    ctk.CTkLabel(f_der, text="Sección / Sub-ubicación (Opcional)", font=("Arial", 14, "bold"), text_color="#F59E0B").pack(anchor="w")
+    self.var_sububicacion = ctk.StringVar()
+    self.var_sububicacion.trace_add("write", self.al_cambiar_ubicacion_texto)
+    self.entry_sububicacion = ctk.CTkEntry(
+        f_der, textvariable=self.var_sububicacion, font=("Arial", 18, "bold"), placeholder_text="Ej. Football, Originals...",
+        fg_color="#0E1117", border_color="#F59E0B", text_color="white", height=45
+    )
+    self.entry_sububicacion.pack(fill="x", pady=(5, 0))
+
     frame_scan = ctk.CTkFrame(self.tab_escaneo, fg_color="#262730", corner_radius=10)
     frame_scan.pack(fill="x", pady=5, padx=10)
-    
     ctk.CTkLabel(frame_scan, text="2. Disparo de Pistola", font=("Arial", 14, "bold"), text_color="#39FF88").pack(anchor="w", padx=15, pady=(10, 0))
-    
     self.entry_scanner = ctk.CTkEntry(
         frame_scan, font=("Arial", 22, "bold"), fg_color="#0E1117", 
         border_color="#39FF88", text_color="white", height=55
@@ -308,7 +371,6 @@ class SistemaBodegaApp:
     self.entry_scanner.bind("<Return>", self.procesar_disparo_escaneo)
     self.root.bind("<Control-z>", lambda event: self.deshacer_ultimo_escaneo())
 
-    # Bloque 3: Acciones y Estatus
     frame_acciones = ctk.CTkFrame(self.tab_escaneo, fg_color="transparent")
     frame_acciones.pack(fill="x", pady=10, padx=10)
 
@@ -334,17 +396,23 @@ class SistemaBodegaApp:
     )
     self.lbl_contador.pack(fill="x")
 
-    # Tabla
     self.tree_escaneo = ttk.Treeview(
         self.tab_escaneo, columns=("codigo", "desc", "talla", "ub", "cant"), show="headings", height=10
     )
-    for col, head, w in [("codigo", "Código", 140), ("desc", "Descripción", 360), ("talla", "Talla", 80), ("ub", "Ubicación", 100), ("cant", "Piezas", 100)]:
+    for col, head, w in [("codigo", "Código", 140), ("desc", "Descripción", 360), ("talla", "Talla", 80), ("ub", "Ubicación", 130), ("cant", "Piezas", 100)]:
       self.tree_escaneo.heading(col, text=head)
       self.tree_escaneo.column(col, width=w)
     self.tree_escaneo.pack(fill="both", expand=True, pady=10, padx=10)
 
+  def obtener_ubicacion_completa(self):
+      ubi = self.var_ubicacion.get().strip().upper()
+      sub = self.var_sububicacion.get().strip().upper()
+      if ubi and sub:
+          return f"{ubi} - {sub}"
+      return ubi
+
   def al_cambiar_ubicacion_texto(self, *args):
-    nueva_ub = self.var_ubicacion.get().strip().upper()
+    nueva_ub = self.obtener_ubicacion_completa()
     if nueva_ub != self.ubicacion_actual:
       self.ubicacion_actual = nueva_ub
       self.contador_estante = 0
@@ -354,7 +422,7 @@ class SistemaBodegaApp:
     codigo_raw = self.entry_scanner.get()
     self.entry_scanner.delete(0, tk.END)
     codigo = limpiar_codigo(codigo_raw)
-    ubicacion = self.var_ubicacion.get().strip().upper()
+    ubicacion = self.obtener_ubicacion_completa()
 
     if not ubicacion or not codigo:
       return
@@ -435,15 +503,29 @@ class SistemaBodegaApp:
     frame_orig = ctk.CTkFrame(self.tab_traspaso, fg_color="#262730", corner_radius=10)
     frame_orig.pack(fill="x", pady=10, padx=10)
     ctk.CTkLabel(frame_orig, text="Ubicación ORIGEN (De donde SALE)", font=("Arial", 14, "bold"), text_color="#EF4444").pack(anchor="w", padx=15, pady=(10, 0))
-    self.entry_orig = ctk.CTkEntry(frame_orig, font=("Arial", 18, "bold"), fg_color="#0E1117", border_color="#EF4444", text_color="white", height=45)
-    self.entry_orig.insert(0, "PISO")
-    self.entry_orig.pack(fill="x", padx=15, pady=(5, 15))
+    
+    f_orig_cols = ctk.CTkFrame(frame_orig, fg_color="transparent")
+    f_orig_cols.pack(fill="x", padx=15, pady=5)
+    
+    self.entry_orig = ctk.CTkEntry(f_orig_cols, font=("Arial", 16, "bold"), placeholder_text="Ubicación (Ej. PV)", fg_color="#0E1117", border_color="#EF4444", text_color="white", height=40)
+    self.entry_orig.pack(side="left", fill="x", expand=True, padx=(0, 5))
+    self.entry_orig.insert(0, "PV")
+    
+    self.entry_orig_sub = ctk.CTkEntry(f_orig_cols, font=("Arial", 16, "bold"), placeholder_text="Sub-ubicación (Ej. FOOTBALL)", fg_color="#0E1117", border_color="#F59E0B", text_color="white", height=40)
+    self.entry_orig_sub.pack(side="right", fill="x", expand=True, padx=(5, 0))
 
     frame_dest = ctk.CTkFrame(self.tab_traspaso, fg_color="#262730", corner_radius=10)
     frame_dest.pack(fill="x", pady=10, padx=10)
     ctk.CTkLabel(frame_dest, text="Ubicación DESTINO (A donde ENTRA)", font=("Arial", 14, "bold"), text_color="#39FF88").pack(anchor="w", padx=15, pady=(10, 0))
-    self.entry_dest = ctk.CTkEntry(frame_dest, font=("Arial", 18, "bold"), fg_color="#0E1117", border_color="#39FF88", text_color="white", height=45)
-    self.entry_dest.pack(fill="x", padx=15, pady=(5, 15))
+    
+    f_dest_cols = ctk.CTkFrame(frame_dest, fg_color="transparent")
+    f_dest_cols.pack(fill="x", padx=15, pady=5)
+    
+    self.entry_dest = ctk.CTkEntry(f_dest_cols, font=("Arial", 16, "bold"), placeholder_text="Ubicación (Ej. PV o C3A)", fg_color="#0E1117", border_color="#39FF88", text_color="white", height=40)
+    self.entry_dest.pack(side="left", fill="x", expand=True, padx=(0, 5))
+    
+    self.entry_dest_sub = ctk.CTkEntry(f_dest_cols, font=("Arial", 16, "bold"), placeholder_text="Sub-ubicación (Opcional)", fg_color="#0E1117", border_color="#F59E0B", text_color="white", height=40)
+    self.entry_dest_sub.pack(side="right", fill="x", expand=True, padx=(5, 0))
 
     frame_scan_t = ctk.CTkFrame(self.tab_traspaso, fg_color="#262730", corner_radius=10)
     frame_scan_t.pack(fill="x", pady=10, padx=10)
@@ -456,7 +538,7 @@ class SistemaBodegaApp:
     self.lbl_status_t.pack(fill="x", pady=5)
 
     self.tree_traspaso = ttk.Treeview(self.tab_traspaso, columns=("codigo", "desc", "orig", "dest"), show="headings", height=10)
-    for col, head, w in [("codigo", "Código", 150), ("desc", "Descripción", 400), ("orig", "Origen", 120), ("dest", "Destino", 120)]:
+    for col, head, w in [("codigo", "Código", 150), ("desc", "Descripción", 400), ("orig", "Origen", 140), ("dest", "Destino", 140)]:
       self.tree_traspaso.heading(col, text=head)
       self.tree_traspaso.column(col, width=w)
     self.tree_traspaso.pack(fill="both", expand=True, pady=10, padx=10)
@@ -464,8 +546,14 @@ class SistemaBodegaApp:
   def procesar_disparo_traspaso(self, event):
     codigo = limpiar_codigo(self.entry_scan_traspaso.get())
     self.entry_scan_traspaso.delete(0, tk.END)
-    origen = self.entry_orig.get().strip().upper()
-    destino = self.entry_dest.get().strip().upper()
+    
+    orig_main = self.entry_orig.get().strip().upper()
+    orig_sub = self.entry_orig_sub.get().strip().upper()
+    origen = f"{orig_main} - {orig_sub}" if orig_main and orig_sub else orig_main
+    
+    dest_main = self.entry_dest.get().strip().upper()
+    dest_sub = self.entry_dest_sub.get().strip().upper()
+    destino = f"{dest_main} - {dest_sub}" if dest_main and dest_sub else dest_main
 
     if not origen or not destino or not codigo:
       self.lbl_status_t.configure(text="⚠️ Define Origen y Destino correctamente.", text_color="#EF4444")
@@ -488,8 +576,161 @@ class SistemaBodegaApp:
 
     self.tree_traspaso.insert("", 0, values=(codigo, desc, origen, destino))
 
+  # --- PESTAÑA: MOVIMIENTOS MASIVOS (SOBRESCRITURA Y VACIADO) ---
+  def setup_tab_masivo(self):
+    # SECCIÓN 1: MOVER Y SOBRESCRIBIR
+    frame_instruccion = ctk.CTkFrame(self.tab_masivo, fg_color="#262730", corner_radius=10)
+    frame_instruccion.pack(fill="x", pady=(10, 5), padx=10)
+    ctk.CTkLabel(
+        frame_instruccion, 
+        text="⚠️ Sobrescribir: Mueve TODO el inventario de un origen, borrando lo que había en el destino.", 
+        font=("Arial", 12, "bold"), text_color="#F59E0B"
+    ).pack(padx=15, pady=10)
+
+    frame_inputs = ctk.CTkFrame(self.tab_masivo, fg_color="transparent")
+    frame_inputs.pack(fill="x", pady=5, padx=10)
+
+    # Origen Masivo (Ubicación + Sub-ubicación)
+    frame_mo = ctk.CTkFrame(frame_inputs, fg_color="#262730", corner_radius=10)
+    frame_mo.pack(side="left", fill="both", expand=True, padx=(0, 5))
+    ctk.CTkLabel(frame_mo, text="Ubicación ORIGEN (A vaciar)", font=("Arial", 13, "bold"), text_color="#EF4444").pack(anchor="w", padx=15, pady=(10, 0))
+    
+    f_mo_cols = ctk.CTkFrame(frame_mo, fg_color="transparent")
+    f_mo_cols.pack(fill="x", padx=15, pady=5)
+    self.entry_masivo_orig = ctk.CTkEntry(f_mo_cols, font=("Arial", 14, "bold"), placeholder_text="Ubicación (Ej. PV)", fg_color="#0E1117", border_color="#EF4444", text_color="white", height=40)
+    self.entry_masivo_orig.pack(side="left", fill="x", expand=True, padx=(0, 5))
+    self.entry_masivo_orig_sub = ctk.CTkEntry(f_mo_cols, font=("Arial", 14, "bold"), placeholder_text="Sub-ubicación (Ej. FOOTBALL)", fg_color="#0E1117", border_color="#F59E0B", text_color="white", height=40)
+    self.entry_masivo_orig_sub.pack(side="right", fill="x", expand=True, padx=(5, 0))
+
+    # Destino Masivo (Ubicación + Sub-ubicación)
+    frame_md = ctk.CTkFrame(frame_inputs, fg_color="#262730", corner_radius=10)
+    frame_md.pack(side="right", fill="both", expand=True, padx=(5, 0))
+    ctk.CTkLabel(frame_md, text="Ubicación DESTINO (A sobrescribir)", font=("Arial", 13, "bold"), text_color="#39FF88").pack(anchor="w", padx=15, pady=(10, 0))
+    
+    f_md_cols = ctk.CTkFrame(frame_md, fg_color="transparent")
+    f_md_cols.pack(fill="x", padx=15, pady=5)
+    self.entry_masivo_dest = ctk.CTkEntry(f_md_cols, font=("Arial", 14, "bold"), placeholder_text="Ubicación (Ej. PV)", fg_color="#0E1117", border_color="#39FF88", text_color="white", height=40)
+    self.entry_masivo_dest.pack(side="left", fill="x", expand=True, padx=(0, 5))
+    self.entry_masivo_dest_sub = ctk.CTkEntry(f_md_cols, font=("Arial", 14, "bold"), placeholder_text="Sub-ubicación (Opcional)", fg_color="#0E1117", border_color="#F59E0B", text_color="white", height=40)
+    self.entry_masivo_dest_sub.pack(side="right", fill="x", expand=True, padx=(5, 0))
+
+    self.btn_ejecutar_masivo = ctk.CTkButton(
+        self.tab_masivo, text="🚀 SOBRESCRIBIR Y MOVER UBICACIÓN COMPLETA", font=("Arial", 14, "bold"),
+        fg_color="#00D9F5", text_color="black", hover_color="#00A0B5", height=45,
+        command=self.ejecutar_movimiento_masivo
+    )
+    self.btn_ejecutar_masivo.pack(fill="x", pady=10, padx=10)
+
+    # SEPARADOR VISUAL
+    separador = ctk.CTkFrame(self.tab_masivo, height=2, fg_color="#334155")
+    separador.pack(fill="x", pady=15, padx=20)
+
+    # SECCIÓN 2: VACIAR ESTANTE COMPLETO (Con Ubicación + Sub-ubicación también)
+    frame_vaciar = ctk.CTkFrame(self.tab_masivo, fg_color="#262730", corner_radius=10, border_width=1, border_color="#EF4444")
+    frame_vaciar.pack(fill="x", pady=5, padx=10)
+    
+    ctk.CTkLabel(
+        frame_vaciar, 
+        text="🗑️ Vaciar Ubicación Completa (Borrar todo el inventario de un estante/sección)", 
+        font=("Arial", 13, "bold"), text_color="#EF4444"
+    ).pack(padx=15, pady=(10, 0), anchor="w")
+
+    frame_vaciar_input = ctk.CTkFrame(frame_vaciar, fg_color="transparent")
+    frame_vaciar_input.pack(fill="x", padx=15, pady=10)
+
+    self.entry_vaciar_ubi = ctk.CTkEntry(
+        frame_vaciar_input, font=("Arial", 14, "bold"), placeholder_text="Ubicación (Ej. PV)",
+        fg_color="#0E1117", border_color="#EF4444", text_color="white", height=42
+    )
+    self.entry_vaciar_ubi.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+    self.entry_vaciar_ubi_sub = ctk.CTkEntry(
+        frame_vaciar_input, font=("Arial", 14, "bold"), placeholder_text="Sub-ubicación (Ej. FOOTBALL)",
+        fg_color="#0E1117", border_color="#F59E0B", text_color="white", height=42
+    )
+    self.entry_vaciar_ubi_sub.pack(side="left", fill="x", expand=True, padx=(5, 10))
+
+    self.btn_vaciar = ctk.CTkButton(
+        frame_vaciar_input, text="⚠️ VACIAR AHORA", font=("Arial", 14, "bold"),
+        fg_color="#EF4444", text_color="white", hover_color="#B91C1C", height=42, width=160,
+        command=self.ejecutar_vaciado
+    )
+    self.btn_vaciar.pack(side="right")
+
+    self.lbl_status_masivo = ctk.CTkLabel(
+        self.tab_masivo, text="Selecciona una acción masiva con cuidado.", font=("Arial", 13, "bold"), text_color="#94A3B8"
+    )
+    self.lbl_status_masivo.pack(fill="x", pady=10)
+
+  def ejecutar_movimiento_masivo(self):
+    orig_main = self.entry_masivo_orig.get().strip().upper()
+    orig_sub = self.entry_masivo_orig_sub.get().strip().upper()
+    origen = f"{orig_main} - {orig_sub}" if orig_main and orig_sub else orig_main
+
+    dest_main = self.entry_masivo_dest.get().strip().upper()
+    dest_sub = self.entry_masivo_dest_sub.get().strip().upper()
+    destino = f"{dest_main} - {dest_sub}" if dest_main and dest_sub else dest_main
+
+    if not origen or not destino:
+      messagebox.showwarning("Atención", "Debes especificar la ubicación de Origen y la de Destino.")
+      return
+
+    confirmar = messagebox.askyesno(
+        "Confirmar Traspaso Masivo",
+        f"¿Estás completamente seguro de mover TODO el inventario de '{origen}' hacia '{destino}'?\n\n⚠️ ADVERTENCIA: Esto BORRARÁ lo que había previamente en '{destino}' y dejará únicamente lo del origen."
+    )
+
+    if not confirmar:
+      return
+
+    self.lbl_status_masivo.configure(text="⏳ Procesando sobrescritura masiva en Supabase...", text_color="#F59E0B")
+    self.root.update()
+
+    movidos, mensaje = mover_ubicacion_completa(origen, destino)
+
+    if movidos > 0:
+      self.lbl_status_masivo.configure(text=f"✅ {mensaje}", text_color="#39FF88")
+      messagebox.showinfo("Éxito", mensaje)
+      self.entry_masivo_orig.delete(0, tk.END)
+      self.entry_masivo_orig_sub.delete(0, tk.END)
+      self.entry_masivo_dest.delete(0, tk.END)
+      self.entry_masivo_dest_sub.delete(0, tk.END)
+    else:
+      self.lbl_status_masivo.configure(text=f"❌ {mensaje}", text_color="#EF4444")
+      messagebox.showerror("Aviso", mensaje)
+
+  def ejecutar_vaciado(self):
+      vac_main = self.entry_vaciar_ubi.get().strip().upper()
+      vac_sub = self.entry_vaciar_ubi_sub.get().strip().upper()
+      ubicacion = f"{vac_main} - {vac_sub}" if vac_main and vac_sub else vac_main
+
+      if not ubicacion:
+          messagebox.showwarning("Atención", "Escribe el nombre de la ubicación que deseas vaciar.")
+          return
+          
+      confirmar = messagebox.askyesno(
+          "⚠️ PELIGRO: Confirmar Vaciado",
+          f"Estás a punto de BORRAR todo el inventario registrado en la ubicación:\n\n'{ubicacion}'\n\n¿Estás seguro de que deseas vaciarla por completo?"
+      )
+      
+      if not confirmar:
+          return
+          
+      self.lbl_status_masivo.configure(text=f"⏳ Vaciando la ubicación '{ubicacion}' en Supabase...", text_color="#F59E0B")
+      self.root.update()
+      
+      exito, mensaje = vaciar_ubicacion_completa(ubicacion)
+      
+      if exito:
+          self.lbl_status_masivo.configure(text=f"✅ {mensaje}", text_color="#39FF88")
+          messagebox.showinfo("Vaciado Exitoso", mensaje)
+          self.entry_vaciar_ubi.delete(0, tk.END)
+          self.entry_vaciar_ubi_sub.delete(0, tk.END)
+      else:
+          self.lbl_status_masivo.configure(text=f"❌ {mensaje}", text_color="#EF4444")
+          messagebox.showerror("Error", mensaje)
 
 if __name__ == "__main__":
-  root = ctk.CTk()  # Arrancamos con la base de la nueva librería
+  root = ctk.CTk()
   app = SistemaBodegaApp(root)
   root.mainloop()

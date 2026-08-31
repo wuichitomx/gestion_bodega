@@ -267,8 +267,12 @@ def mostrar_resumen_piso_ventas(supabase):
     df_ubic_all = pd.DataFrame(res_ubic_all.data)
     df_cat = pd.DataFrame(res_cat.data)
     
-    df_ubic_pv = df_ubic_all[df_ubic_all['ubicacion'].astype(str).str.strip().str.upper() == 'PV'].copy()
-    df_ubic_bodega = df_ubic_all[df_ubic_all['ubicacion'].astype(str).str.strip().str.upper() != 'PV'].copy()
+    # MODIFICACIÓN: Reconocer tanto 'PV' exacto como sub-ubicaciones que inicien con 'PV -' o 'PV-'
+    ubi_up = df_ubic_all['ubicacion'].astype(str).str.strip().str.upper()
+    is_pv = (ubi_up == 'PV') | (ubi_up.str.startswith('PV -')) | (ubi_up.str.startswith('PV-'))
+    
+    df_ubic_pv = df_ubic_all[is_pv].copy()
+    df_ubic_bodega = df_ubic_all[~is_pv].copy()
     
     if df_ubic_pv.empty:
         st.warning("No hay productos registrados específicamente en la ubicación 'PV' (Piso de Ventas).")
@@ -682,7 +686,6 @@ with tab_perf:
                 alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
                 falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
                 
-                # Cálculo de cuánto falta para alcanzar al primer lugar en ventas
                 max_venta_red = df_v['Neto_D_num'].max()
                 diferencia_primer_lugar = max_venta_red - venta_asesor_neto
                 if diferencia_primer_lugar > 0:
