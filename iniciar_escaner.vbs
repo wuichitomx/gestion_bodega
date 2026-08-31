@@ -1,1 +1,1 @@
-CreateObject("Wscript.Shell").Run "cmd /c cd /d C:\Users\Luis\Desktop\bodega\gestion_bodega && call .venv\Scripts\activate && python desktop_app.py", 0, False
+CreateObject("Wscript.Shell").Run "cmd /c cd /d C:\Users\Luis\Desktop\bodega\gestion_bodega && call .venv\Scripts\activate && python desktop_app.py", 1, True
