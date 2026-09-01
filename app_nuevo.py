@@ -158,7 +158,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.21 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.26 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -188,7 +188,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.21 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.26 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -258,16 +258,13 @@ def mostrar_resumen_piso_ventas(supabase):
     st.header("📊 Resumen Ejecutivo: Piso de Ventas (PV)")
     
     res_ubic_all = supabase.table("ubicaciones").select("*").execute()
-    res_cat = supabase.table("catalogo_erp").select("codigo_limpio, referencia, descripcion, nivel1, nivel2, nivel3, nivel4, stock_sistema").execute()
     
     if not res_ubic_all.data:
         st.warning("No hay registros en la tabla de ubicaciones.")
         return
         
     df_ubic_all = pd.DataFrame(res_ubic_all.data)
-    df_cat = pd.DataFrame(res_cat.data)
     
-    # MODIFICACIÓN: Reconocer tanto 'PV' exacto como sub-ubicaciones que inicien con 'PV -' o 'PV-'
     ubi_up = df_ubic_all['ubicacion'].astype(str).str.strip().str.upper()
     is_pv = (ubi_up == 'PV') | (ubi_up.str.startswith('PV -')) | (ubi_up.str.startswith('PV-'))
     
@@ -277,7 +274,23 @@ def mostrar_resumen_piso_ventas(supabase):
     if df_ubic_pv.empty:
         st.warning("No hay productos registrados específicamente en la ubicación 'PV' (Piso de Ventas).")
         return
+
+    codigos_a_buscar = df_ubic_all['codigo_limpio'].dropna().astype(str).unique().tolist()
+    
+    df_cat_list = []
+    TAMANO_LOTE = 200
+    for i in range(0, len(codigos_a_buscar), TAMANO_LOTE):
+        lote = codigos_a_buscar[i:i + TAMANO_LOTE]
+        res_cat_lote = supabase.table("catalogo_erp").select("codigo_limpio, referencia, descripcion, nivel1, nivel2, nivel3, nivel4, stock_sistema").in_("codigo_limpio", lote).execute()
+        if res_cat_lote.data:
+            df_cat_list.extend(res_cat_lote.data)
+            
+    if not df_cat_list:
+        st.warning("No se encontraron coincidencias en el catálogo ERP para los productos escaneados.")
+        return
         
+    df_cat = pd.DataFrame(df_cat_list)
+    
     df_cruce = pd.merge(df_ubic_pv, df_cat, on="codigo_limpio", how="left")
     df_cruce.fillna({
         "nivel1": "Sin Categoría", 
@@ -441,10 +454,8 @@ if os.path.exists("ventas_diarias_temp.csv"):
             codigo_erp_bd_actual = st.session_state.usuario_actual
         usuario_code_actual = str(codigo_erp_bd_actual).strip().lower()
         
-        # Verificamos líderes en cada categoría si existen las columnas
         es_top_cualquiera = False
         
-        # 1. Ventas Netas
         if 'Neto_D_num' in df_v_felicitacion.columns:
             top_neto = df_v_felicitacion.loc[df_v_felicitacion['Neto_D_num'].idxmax()]
             if usuario_code_actual == str(top_neto['codigo']).strip().lower() and top_neto['Neto_D_num'] > 0:
@@ -454,21 +465,18 @@ if os.path.exists("ventas_diarias_temp.csv"):
                     st.session_state.felicitacion_mostrada = True
                 st.success(f"🏆 ¡Felicidades, {top_neto['nombre']}! Eres el primer lugar en ventas con ${top_neto['Neto_D_num']:,.2f}. ¡Sigue así, liderando la red!")
 
-        # 2. UPT
         if 'UPT_D_num' in df_v_felicitacion.columns:
             top_upt = df_v_felicitacion.loc[df_v_felicitacion['UPT_D_num'].idxmax()]
             if usuario_code_actual == str(top_upt['codigo']).strip().lower() and top_upt['UPT_D_num'] > 0:
                 es_top_cualquiera = True
                 st.success(f"🎯 ¡Felicidades, {top_upt['nombre']}! Eres el primer lugar en UPT con {top_upt['UPT_D_num']:,.2f} unidades por ticket. ¡Excelente trabajo!")
 
-        # 3. ASP
         if 'ASP_D_num' in df_v_felicitacion.columns:
             top_asp = df_v_felicitacion.loc[df_v_felicitacion['ASP_D_num'].idxmax()]
             if usuario_code_actual == str(top_asp['codigo']).strip().lower() and top_asp['ASP_D_num'] > 0:
                 es_top_cualquiera = True
                 st.success(f"💎 ¡Felicidades, {top_asp['nombre']}! Eres el primer lugar en ASP con un precio promedio de ${top_asp['ASP_D_num']:,.2f}. ¡Imparable!")
 
-        # 4. ATV
         if 'ATV_D_num' in df_v_felicitacion.columns:
             top_atv = df_v_felicitacion.loc[df_v_felicitacion['ATV_D_num'].idxmax()]
             if usuario_code_actual == str(top_atv['codigo']).strip().lower() and top_atv['ATV_D_num'] > 0:
@@ -480,145 +488,12 @@ if os.path.exists("ventas_diarias_temp.csv"):
             st.session_state.felicitacion_mostrada = True
 
 if st.session_state.es_admin:
-    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📈 Resumen PV", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
-    tab_perf, tab_busqueda, tab_resumen_pv, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5]
+    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📈 Resumen PV", "📐 Rendimiento m²", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
+    tab_perf, tab_busqueda, tab_resumen_pv, tab_rendimiento_m2, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5], tabs[6]
 else:
     tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual"])
     tab_perf, tab_busqueda = tabs[0], tabs[1]
-    tab_resumen_pv, tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None, None
-
-# ------------------------------------------
-# 5. PESTAÑA: ADMIN & CARGA ERP (SÓLO ADMIN)
-# ------------------------------------------
-if tab_admin_erp is not None:
-    with tab_admin_erp:
-        st.subheader("📥 Cargar Reporte de Ventas Diario del ERP (Excel)")
-        archivo_sales = st.file_uploader("Subir Archivo Excel de Ventas", type=["xlsx", "xls"], key="sales_excel")
-        
-        if archivo_sales is not None:
-            try:
-                df_raw = pd.read_excel(archivo_sales, header=2)
-                df_raw = df_raw[df_raw['No. Línea'].notna() & (df_raw['No. Línea'].astype(str).str.strip().str.upper() != 'TOTALES')]
-                
-                df_raw['codigo'] = df_raw['Código de Vendedor'].astype(str).str.strip()
-                df_raw['nombre'] = df_raw['Vendedor'].astype(str).str.strip()
-                
-                df_raw['Neto_D_num'] = pd.to_numeric(df_raw['Venta Neta'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                df_raw['UPT_D_num'] = pd.to_numeric(df_raw['Items x Doc.'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                df_raw['ATV_D_num'] = pd.to_numeric(df_raw['Venta x Documento'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                df_raw['ASP_D_num'] = pd.to_numeric(df_raw['Precio x Unidad'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                
-                df_raw_totales = pd.read_excel(archivo_sales, header=2)
-                row_totales = df_raw_totales[df_raw_totales['No. Línea'].astype(str).str.strip().str.upper() == 'TOTALES']
-                
-                if not row_totales.empty:
-                    df_raw['Neto_T_num'] = float(str(row_totales.iloc[0]['Venta Neta']).replace(',', ''))
-                    df_raw['UPT_T_num'] = float(str(row_totales.iloc[0]['Items x Doc.']).replace(',', ''))
-                    df_raw['ATV_T_num'] = float(str(row_totales.iloc[0]['Venta x Documento']).replace(',', ''))
-                    df_raw['ASP_T_num'] = float(str(row_totales.iloc[0]['Precio x Unidad']).replace(',', ''))
-                else:
-                    df_raw['Neto_T_num'] = df_raw['Neto_D_num'].sum()
-                    df_raw['UPT_T_num'] = df_raw['UPT_D_num'].mean()
-                    df_raw['ATV_T_num'] = df_raw['ATV_D_num'].mean()
-                    df_raw['ASP_T_num'] = df_raw['ASP_D_num'].mean()
-                
-                df_raw.to_csv("ventas_diarias_temp.csv", index=False)
-                st.session_state.felicitacion_mostrada = False
-                
-                st.success("✅ Reporte de ventas en Excel procesado por la red correctamente.")
-                st.info("👉 Ahora puedes ir a la pestaña '📊 Dashboard' para ver los resultados actualizados.")
-            except Exception as ex:
-                st.error(f"Error al procesar el archivo Excel: {ex}")
-        
-        st.markdown("---")
-        st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
-        st.info("Sube aquí el archivo de tu ERP (RPInv_Extracto_Referencia) en formato Excel para sincronizar la red en Supabase.")
-
-        archivo_catalogo = st.file_uploader("Subir Catálogo (Excel)", type=["xlsx", "xls"], key="cat_csv")
-
-        if archivo_catalogo is not None:
-            if st.button("⚡ Sincronizar Catálogo en la Nube"):
-                try:
-                    with st.spinner("Estableciendo sinapsis y sincronizando el núcleo... Esto puede tomar unos segundos."):
-                        df_cat = pd.read_excel(archivo_catalogo, skiprows=5, dtype=str)
-                        
-                        mapeo_columnas = {
-                            'CodigoAlterno': 'codigo_limpio',
-                            'Referencia': 'referencia',
-                            'Descripcion': 'descripcion',
-                            'Cantidad': 'stock_sistema',
-                            'Nivel1': 'nivel1',
-                            'Nivel2': 'nivel2',
-                            'Nivel3': 'nivel3',
-                            'Nivel4': 'nivel4'
-                        }
-                        
-                        df_cat = df_cat.rename(columns=mapeo_columnas)
-                        
-                        if 'referencia' in df_cat.columns:
-                            df_cat['talla'] = df_cat['referencia'].apply(lambda x: str(x).split('-', 1)[1] if '-' in str(x) else '')
-                        
-                        columnas_esperadas = ['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'nivel2', 'nivel3', 'nivel4', 'stock_sistema']
-                        columnas_existentes = [col for col in columnas_esperadas if col in df_cat.columns]
-                        df_cat = df_cat[columnas_existentes]
-                        
-                        if 'stock_sistema' in df_cat.columns:
-                            df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0).astype(int)
-                        
-                        if 'codigo_limpio' in df_cat.columns:
-                            df_cat = df_cat.dropna(subset=['codigo_limpio'])
-                        
-                        df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
-                        registros = df_cat.to_dict(orient="records")
-
-                        TAMANO_BLOQUE = 500
-                        total_registros = len(registros)
-                        
-                        barra_progreso = st.progress(0, text=f"Sincronizando 0 de {total_registros} artículos...")
-
-                        for i in range(0, total_registros, TAMANO_BLOQUE):
-                            bloque = registros[i:i + TAMANO_BLOQUE]
-                            supabase.table("catalogo_erp").upsert(bloque).execute()
-
-                            subidos = min(i + TAMANO_BLOQUE, total_registros)
-                            porcentaje = subidos / total_registros
-                            barra_progreso.progress(porcentaje, text=f"Sincronizando {subidos} de {total_registros} artículos...")
-
-                        barra_progreso.empty()
-                        st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {total_registros} artículos.")
-                except Exception as ex:
-                    st.error(f"⚠️ Error al sincronizar: {ex}")
-        
-        st.markdown("---")
-        st.subheader("⚙️ Configuración de Metas por Asesor")
-        
-        res_u = supabase.table("usuarios").select("*").execute().data
-        if res_u:
-            df_u = pd.DataFrame(res_u)
-            for col in ['codigo_erp', 'nombre_completo', 'meta_mensual']:
-                if col not in df_u.columns:
-                    df_u[col] = ""
-                    
-            edited_df = st.data_editor(
-                df_u[['username', 'codigo_erp', 'nombre_completo', 'meta_mensual']],
-                column_config={
-                    "username": st.column_config.TextColumn("Usuario App", disabled=True),
-                    "codigo_erp": st.column_config.TextColumn("Código ERP"),
-                    "nombre_completo": st.column_config.TextColumn("Nombre Completo"),
-                    "meta_mensual": st.column_config.NumberColumn("Meta Mensual ($)", format="$%.2f", step=0.01, min_value=0.0)
-                },
-                use_container_width=True
-            )
-            
-            if st.button("Guardar Cambios de Metas"):
-                for _, row in edited_df.iterrows():
-                    supabase.table("usuarios").update({
-                        "codigo_erp": str(row['codigo_erp']).strip(),
-                        "nombre_completo": str(row['nombre_completo']).strip(),
-                        "meta_mensual": float(row['meta_mensual']) if row['meta_mensual'] else 0.0
-                    }).eq("username", row['username']).execute()
-                st.success("¡Metas guardadas correctamente en la red!")
-                st.rerun()
+    tab_resumen_pv, tab_rendimiento_m2, tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None, None, None
 
 # ------------------------------------------
 # 1. PESTAÑA: PERFORMANCE & KPIS (DASHBOARD)
@@ -865,7 +740,309 @@ if tab_resumen_pv is not None:
         mostrar_resumen_piso_ventas(supabase)
 
 # ------------------------------------------
-# 4. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
+# 4. PESTAÑA: RENDIMIENTO M2 (SÓLO ADMIN)
+# ------------------------------------------
+if tab_rendimiento_m2 is not None:
+    with tab_rendimiento_m2:
+        st.header("📐 Rendimiento Monetario por Sub-ubicación ($ / m²)")
+        st.markdown(
+            "Carga tu reporte de ventas a nivel de referencia (SKU). El sistema cruzará la venta neta con las ubicaciones escaneadas en Piso de Ventas, "
+            "y dividirá el valor monetario de cada mueble o góndola entre el total del tamaño de la tienda (**268.61 m²**)."
+        )
+        st.info("💡 **Dato Inteligente:** La venta de códigos ubicados en múltiples muebles se prorratea proporcionalmente según la cantidad de piezas exhibidas en cada uno.")
+        
+        archivo_ventas_ref = st.file_uploader("📥 Subir: Extracto Referencia - Documento (Costo) [Excel]", type=["xlsx", "xls"], key="ventas_ref_m2")
+
+        if archivo_ventas_ref is not None:
+            with st.spinner("Analizando rendimiento por mueble de exhibición..."):
+                try:
+                    # Búsqueda dinámica de la fila de encabezados real
+                    df_ventas = None
+                    for h in range(10):
+                        df_temp = pd.read_excel(archivo_ventas_ref, header=h)
+                        if any(df_temp.columns.astype(str).str.contains('Referencia', case=False, na=False)) and \
+                           any(df_temp.columns.astype(str).str.contains('Venta Neta', case=False, na=False)):
+                            df_ventas = df_temp
+                            break
+                    
+                    if df_ventas is None:
+                        df_ventas = pd.read_excel(archivo_ventas_ref, header=2)
+
+                    df_ventas.columns = df_ventas.columns.astype(str).str.strip()
+
+                    if 'Referencia' not in df_ventas.columns or 'Venta Neta' not in df_ventas.columns:
+                        st.error("⚠️ El formato del archivo no coincide. Asegúrate de incluir las columnas 'Referencia' y 'Venta Neta'.")
+                    else:
+                        df_ventas = df_ventas.dropna(subset=['Referencia']).copy()
+                        df_ventas = df_ventas[
+                            ~df_ventas['Referencia'].astype(str).str.strip().str.lower().isin(['', 'nan', 'none', 'totales'])
+                        ].copy()
+                        
+                        # ======================================================
+                        # CRUCE CORRECTO: SKU EXACTO -> CÓDIGO ERP -> UBICACIÓN
+                        # ======================================================
+                        # El reporte trae la referencia completa (ej. JZ7205-M).
+                        # NO debemos cortar por '-' porque eso mezcla tallas/SKUs
+                        # distintos del mismo modelo.
+                        df_ventas['sku'] = (
+                            df_ventas['Referencia'].astype(str)
+                            .str.strip().str.upper()
+                        )
+
+                        # Limpieza robusta de la Venta Neta
+                        df_ventas['Venta Neta'] = pd.to_numeric(
+                            df_ventas['Venta Neta'].astype(str)
+                            .str.replace(r'[^0-9.\-]', '', regex=True),
+                            errors='coerce'
+                        ).fillna(0.0)
+
+                        # Consolidamos todo el periodo por SKU exacto.
+                        df_v_agrup = (
+                            df_ventas.groupby('sku', as_index=False)['Venta Neta']
+                            .sum()
+                            .rename(columns={'Venta Neta': 'Venta_Neta_SKU'})
+                        )
+
+                        # Traemos el catálogo para convertir la Referencia/SKU
+                        # del ERP al codigo_limpio que utiliza el scanner.
+                        res_cat = supabase.table("catalogo_erp").select(
+                            "codigo_limpio, referencia, descripcion"
+                        ).execute()
+                        df_cat_m2 = pd.DataFrame(res_cat.data or [])
+
+                        if df_cat_m2.empty or 'referencia' not in df_cat_m2.columns:
+                            st.error("⚠️ No se pudo cargar el catálogo ERP para relacionar las referencias con los códigos escaneados.")
+                        else:
+                            df_cat_m2['sku'] = (
+                                df_cat_m2['referencia'].astype(str)
+                                .str.strip().str.upper()
+                            )
+                            df_cat_m2 = df_cat_m2.dropna(subset=['codigo_limpio', 'sku'])
+                            df_cat_m2 = df_cat_m2.drop_duplicates(subset=['sku'], keep='first')
+
+                            # Venta SKU -> codigo_limpio.
+                            df_v_sku = df_v_agrup.merge(
+                                df_cat_m2[['sku', 'codigo_limpio', 'descripcion']],
+                                on='sku', how='left'
+                            )
+
+                            res_ubic_all = supabase.table("ubicaciones").select(
+                                "codigo_limpio, ubicacion, cantidad"
+                            ).execute()
+                            df_ubic_all = pd.DataFrame(res_ubic_all.data or [])
+
+                            if df_ubic_all.empty:
+                                st.warning("No hay ubicaciones escaneadas en la red aún.")
+                            else:
+                                df_ubic_all['codigo_limpio'] = (
+                                    df_ubic_all['codigo_limpio'].astype(str).str.strip()
+                                )
+                                df_ubic_all['ubicacion'] = (
+                                    df_ubic_all['ubicacion'].astype(str).str.strip()
+                                )
+                                df_ubic_all['cantidad'] = pd.to_numeric(
+                                    df_ubic_all['cantidad'], errors='coerce'
+                                ).fillna(0.0)
+
+                                # Sólo Piso de Ventas.
+                                ubi_up = df_ubic_all['ubicacion'].str.upper()
+                                is_pv = (
+                                    (ubi_up == 'PV') |
+                                    ubi_up.str.startswith('PV -') |
+                                    ubi_up.str.startswith('PV-')
+                                )
+                                df_pv = df_ubic_all[is_pv].copy()
+
+                                if df_pv.empty:
+                                    st.warning("No hay productos con ubicaciones de Piso de Ventas (PV) registrados en el escáner.")
+                                else:
+                                    # Agrupamos primero SKU + mueble, por si el scanner
+                                    # generó más de un registro para el mismo SKU en la misma ubicación.
+                                    df_pv = (
+                                        df_pv.groupby(['codigo_limpio', 'ubicacion'], as_index=False)['cantidad']
+                                        .sum()
+                                    )
+
+                                    # Cruzamos cada ubicación con la venta del SKU exacto.
+                                    df_pv = df_pv.merge(
+                                        df_v_sku[['sku', 'codigo_limpio', 'Venta_Neta_SKU', 'descripcion']],
+                                        on='codigo_limpio', how='left'
+                                    )
+
+                                    df_pv['Venta_Neta_SKU'] = pd.to_numeric(
+                                        df_pv['Venta_Neta_SKU'], errors='coerce'
+                                    ).fillna(0.0)
+
+                                    # Para cada SKU, la venta se reparte entre los muebles
+                                    # proporcionalmente a las piezas exhibidas.
+                                    total_piezas_por_sku = (
+                                        df_pv.groupby('codigo_limpio')['cantidad']
+                                        .transform('sum')
+                                    )
+                                    df_pv['factor_ubicacion'] = (
+                                        df_pv['cantidad'] / total_piezas_por_sku.replace(0, 1)
+                                    )
+                                    df_pv['venta_atribuida'] = (
+                                        df_pv['Venta_Neta_SKU'] * df_pv['factor_ubicacion']
+                                    )
+
+                                    # SKU exacto = referencia completa del ERP.
+                                    # Un mismo SKU puede estar en varios muebles.
+                                    # Por eso el nunique se hace sobre sku, no sobre modelo_base.
+                                    resumen_muebles = (
+                                        df_pv.groupby('ubicacion')
+                                        .agg(
+                                            SKUs_Distintos=('sku', 'nunique'),
+                                            Piezas_Fisicas=('cantidad', 'sum'),
+                                            Venta_Total=('venta_atribuida', 'sum')
+                                        )
+                                        .reset_index()
+                                    )
+
+                                    # 268.61 m² es el área TOTAL de la tienda,
+                                    # tal como definiste el indicador.
+                                    M2_TIENDA_TOTAL = 268.61
+                                    resumen_muebles['Rendimiento_m2'] = (
+                                        resumen_muebles['Venta_Total'] / M2_TIENDA_TOTAL
+                                    )
+                                    resumen_muebles = (
+                                        resumen_muebles
+                                        .sort_values('Rendimiento_m2', ascending=False)
+                                        .reset_index(drop=True)
+                                    )
+
+                                    # --------------------------------------------------
+                                    # Indicadores de control del cruce
+                                    # --------------------------------------------------
+                                    venta_erp_total = df_v_agrup['Venta_Neta_SKU'].sum()
+                                    venta_sku_sin_catalogo = df_v_sku.loc[
+                                        df_v_sku['codigo_limpio'].isna(), 'Venta_Neta_SKU'
+                                    ].sum()
+                                    codigos_en_pv = set(df_pv['codigo_limpio'].dropna().astype(str))
+                                    venta_sku_con_catalogo_sin_pv = df_v_sku.loc[
+                                        df_v_sku['codigo_limpio'].notna() &
+                                        ~df_v_sku['codigo_limpio'].astype(str).isin(codigos_en_pv),
+                                        'Venta_Neta_SKU'
+                                    ].sum()
+                                    total_venta_atribuida = resumen_muebles['Venta_Total'].sum()
+
+                                    st.divider()
+                                    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                                    col_m1.metric(
+                                        "Venta Atribuida a Exhibición",
+                                        f"${total_venta_atribuida:,.2f}"
+                                    )
+                                    col_m2.metric(
+                                        "Venta Neta ERP",
+                                        f"${venta_erp_total:,.2f}"
+                                    )
+                                    col_m3.metric(
+                                        "Cobertura Venta → PV",
+                                        f"{(total_venta_atribuida / venta_erp_total * 100) if venta_erp_total else 0:,.1f}%"
+                                    )
+                                    col_m4.metric(
+                                        "Rendimiento Global PV",
+                                        f"${total_venta_atribuida / M2_TIENDA_TOTAL:,.2f} / m²"
+                                    )
+
+                                    if venta_sku_sin_catalogo or venta_sku_con_catalogo_sin_pv:
+                                        with st.expander("🔎 Diagnóstico del cruce ERP ↔ Scanner"):
+                                            st.write(
+                                                f"Venta de SKUs que no encontraron código en catálogo: ${venta_sku_sin_catalogo:,.2f}"
+                                            )
+                                            st.write(
+                                                f"Venta de SKUs con catálogo, pero sin ubicación PV: ${venta_sku_con_catalogo_sin_pv:,.2f}"
+                                            )
+                                            st.caption(
+                                                "Estas ventas no se asignan a ningún mueble porque no existe evidencia de una ubicación PV en el scanner."
+                                            )
+
+                                    st.markdown("---")
+                                    st.subheader("📊 Comparativo de Rendimiento por Sub-ubicación ($ / m²)")
+
+                                    chart_m2 = alt.Chart(resumen_muebles).mark_bar(
+                                        cornerRadiusTopLeft=4,
+                                        cornerRadiusTopRight=4,
+                                        color='#39FF88'
+                                    ).encode(
+                                        x=alt.X(
+                                            'ubicacion:N',
+                                            sort='-y',
+                                            title='Ubicación en Piso de Ventas',
+                                            axis=alt.Axis(labelAngle=-45)
+                                        ),
+                                        y=alt.Y(
+                                            'Rendimiento_m2:Q',
+                                            title='Rendimiento ($ / m²)'
+                                        ),
+                                        tooltip=[
+                                            alt.Tooltip('ubicacion:N', title='Mueble/Área'),
+                                            alt.Tooltip('SKUs_Distintos:Q', title='SKUs Distintos'),
+                                            alt.Tooltip('Piezas_Fisicas:Q', title='Piezas Físicas'),
+                                            alt.Tooltip('Venta_Total:Q', title='Venta Generada ($)', format=',.2f'),
+                                            alt.Tooltip('Rendimiento_m2:Q', title='Rendimiento ($/m²)', format=',.2f')
+                                        ]
+                                    )
+                                    text_m2 = chart_m2.mark_text(
+                                        align='center', baseline='bottom', dy=-5, color='white'
+                                    ).encode(
+                                        text=alt.Text('Rendimiento_m2:Q', format='$,.2f')
+                                    )
+                                    st.altair_chart(
+                                        (chart_m2 + text_m2).properties(height=450),
+                                        use_container_width=True
+                                    )
+
+                                    st.markdown("---")
+                                    st.subheader("📋 Desglose Completo de Sub-ubicaciones")
+
+                                    df_mostrar = resumen_muebles.rename(columns={
+                                        'ubicacion': 'Ubicación / Mueble',
+                                        'SKUs_Distintos': 'SKUs Diferentes Exhibidos',
+                                        'Piezas_Fisicas': 'Total Piezas',
+                                        'Venta_Total': 'Venta Generada ($)',
+                                        'Rendimiento_m2': 'Rendimiento por M² de Tienda ($)'
+                                    })
+
+                                    st.dataframe(
+                                        df_mostrar.style.format({
+                                            'Venta Generada ($)': '${:,.2f}',
+                                            'Rendimiento por M² de Tienda ($)': '${:,.2f}'
+                                        }),
+                                        use_container_width=True,
+                                        hide_index=True
+                                    )
+
+                                    with st.expander("🧩 Ver detalle SKU → Mueble"):
+                                        detalle_m2 = df_pv[[
+                                            'sku', 'codigo_limpio', 'descripcion', 'ubicacion',
+                                            'cantidad', 'Venta_Neta_SKU', 'factor_ubicacion', 'venta_atribuida'
+                                        ]].copy()
+                                        detalle_m2 = detalle_m2.rename(columns={
+                                            'sku': 'SKU / Referencia',
+                                            'codigo_limpio': 'Código Escaneado',
+                                            'descripcion': 'Descripción',
+                                            'ubicacion': 'Ubicación / Mueble',
+                                            'cantidad': 'Piezas Exhibidas',
+                                            'Venta_Neta_SKU': 'Venta Neta del SKU ($)',
+                                            'factor_ubicacion': '% Atribución',
+                                            'venta_atribuida': 'Venta Atribuida ($)'
+                                        })
+                                        st.dataframe(
+                                            detalle_m2.style.format({
+                                                'Venta Neta del SKU ($)': '${:,.2f}',
+                                                '% Atribución': '{:.1%}',
+                                                'Venta Atribuida ($)': '${:,.2f}'
+                                            }),
+                                            use_container_width=True,
+                                            hide_index=True
+                                        )
+
+                except Exception as e:
+                    st.error(f"⚠️ Hubo un error al procesar el archivo. Asegúrate de que sea el reporte correcto. (Detalle técnico: {e})")
+
+# ------------------------------------------
+# 5. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
 # ------------------------------------------
 if tab_escaneo is not None:
     with tab_escaneo:
@@ -879,7 +1056,140 @@ if tab_escaneo is not None:
                 st.warning("Producto no encontrado en el núcleo.")
 
 # ------------------------------------------
-# 6. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
+# 6. PESTAÑA: ADMIN & CARGA ERP (SÓLO ADMIN)
+# ------------------------------------------
+if tab_admin_erp is not None:
+    with tab_admin_erp:
+        st.subheader("📥 Cargar Reporte de Ventas Diario del ERP (Excel)")
+        archivo_sales = st.file_uploader("Subir Archivo Excel de Ventas", type=["xlsx", "xls"], key="sales_excel")
+        
+        if archivo_sales is not None:
+            try:
+                df_raw = pd.read_excel(archivo_sales, header=2)
+                df_raw = df_raw[df_raw['No. Línea'].notna() & (df_raw['No. Línea'].astype(str).str.strip().str.upper() != 'TOTALES')]
+                
+                df_raw['codigo'] = df_raw['Código de Vendedor'].astype(str).str.strip()
+                df_raw['nombre'] = df_raw['Vendedor'].astype(str).str.strip()
+                
+                df_raw['Neto_D_num'] = pd.to_numeric(df_raw['Venta Neta'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['UPT_D_num'] = pd.to_numeric(df_raw['Items x Doc.'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['ATV_D_num'] = pd.to_numeric(df_raw['Venta x Documento'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                df_raw['ASP_D_num'] = pd.to_numeric(df_raw['Precio x Unidad'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                
+                df_raw_totales = pd.read_excel(archivo_sales, header=2)
+                row_totales = df_raw_totales[df_raw_totales['No. Línea'].astype(str).str.strip().str.upper() == 'TOTALES']
+                
+                if not row_totales.empty:
+                    df_raw['Neto_T_num'] = float(str(row_totales.iloc[0]['Venta Neta']).replace(',', ''))
+                    df_raw['UPT_T_num'] = float(str(row_totales.iloc[0]['Items x Doc.']).replace(',', ''))
+                    df_raw['ATV_T_num'] = float(str(row_totales.iloc[0]['Venta x Documento']).replace(',', ''))
+                    df_raw['ASP_T_num'] = float(str(row_totales.iloc[0]['Precio x Unidad']).replace(',', ''))
+                else:
+                    df_raw['Neto_T_num'] = df_raw['Neto_D_num'].sum()
+                    df_raw['UPT_T_num'] = df_raw['UPT_D_num'].mean()
+                    df_raw['ATV_T_num'] = df_raw['ATV_D_num'].mean()
+                    df_raw['ASP_T_num'] = df_raw['ASP_D_num'].mean()
+                
+                df_raw.to_csv("ventas_diarias_temp.csv", index=False)
+                st.session_state.felicitacion_mostrada = False
+                
+                st.success("✅ Reporte de ventas en Excel procesado por la red correctamente.")
+                st.info("👉 Ahora puedes ir a la pestaña '📊 Dashboard' para ver los resultados actualizados.")
+            except Exception as ex:
+                st.error(f"Error al procesar el archivo Excel: {ex}")
+        
+        st.markdown("---")
+        st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
+        st.info("Sube aquí el archivo de tu ERP (RPInv_Extracto_Referencia) en formato Excel para sincronizar la red en Supabase.")
+
+        archivo_catalogo = st.file_uploader("Subir Catálogo (Excel)", type=["xlsx", "xls"], key="cat_csv")
+
+        if archivo_catalogo is not None:
+            if st.button("⚡ Sincronizar Catálogo en la Nube"):
+                try:
+                    with st.spinner("Estableciendo sinapsis y sincronizando el núcleo... Esto puede tomar unos segundos."):
+                        df_cat = pd.read_excel(archivo_catalogo, skiprows=5, dtype=str)
+                        
+                        mapeo_columnas = {
+                            'CodigoAlterno': 'codigo_limpio',
+                            'Referencia': 'referencia',
+                            'Descripcion': 'descripcion',
+                            'Cantidad': 'stock_sistema',
+                            'Nivel1': 'nivel1',
+                            'Nivel2': 'nivel2',
+                            'Nivel3': 'nivel3',
+                            'Nivel4': 'nivel4'
+                        }
+                        
+                        df_cat = df_cat.rename(columns=mapeo_columnas)
+                        
+                        if 'referencia' in df_cat.columns:
+                            df_cat['talla'] = df_cat['referencia'].apply(lambda x: str(x).split('-', 1)[1] if '-' in str(x) else '')
+                        
+                        columnas_esperadas = ['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'nivel2', 'nivel3', 'nivel4', 'stock_sistema']
+                        columnas_existentes = [col for col in columnas_esperadas if col in df_cat.columns]
+                        df_cat = df_cat[columnas_existentes]
+                        
+                        if 'stock_sistema' in df_cat.columns:
+                            df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0).astype(int)
+                        
+                        if 'codigo_limpio' in df_cat.columns:
+                            df_cat = df_cat.dropna(subset=['codigo_limpio'])
+                        
+                        df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
+                        registros = df_cat.to_dict(orient="records")
+
+                        TAMANO_BLOQUE = 500
+                        total_registros = len(registros)
+                        
+                        barra_progreso = st.progress(0, text=f"Sincronizando 0 de {total_registros} artículos...")
+
+                        for i in range(0, total_registros, TAMANO_BLOQUE):
+                            bloque = registros[i:i + TAMANO_BLOQUE]
+                            supabase.table("catalogo_erp").upsert(bloque).execute()
+
+                            subidos = min(i + TAMANO_BLOQUE, total_registros)
+                            porcentaje = subidos / total_registros
+                            barra_progreso.progress(porcentaje, text=f"Sincronizando {subidos} de {total_registros} artículos...")
+
+                        barra_progreso.empty()
+                        st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {total_registros} artículos.")
+                except Exception as ex:
+                    st.error(f"⚠️ Error al sincronizar: {ex}")
+        
+        st.markdown("---")
+        st.subheader("⚙️ Configuración de Metas por Asesor")
+        
+        res_u = supabase.table("usuarios").select("*").execute().data
+        if res_u:
+            df_u = pd.DataFrame(res_u)
+            for col in ['codigo_erp', 'nombre_completo', 'meta_mensual']:
+                if col not in df_u.columns:
+                    df_u[col] = ""
+                    
+            edited_df = st.data_editor(
+                df_u[['username', 'codigo_erp', 'nombre_completo', 'meta_mensual']],
+                column_config={
+                    "username": st.column_config.TextColumn("Usuario App", disabled=True),
+                    "codigo_erp": st.column_config.TextColumn("Código ERP"),
+                    "nombre_completo": st.column_config.TextColumn("Nombre Completo"),
+                    "meta_mensual": st.column_config.NumberColumn("Meta Mensual ($)", format="$%.2f", step=0.01, min_value=0.0)
+                },
+                use_container_width=True
+            )
+            
+            if st.button("Guardar Cambios de Metas"):
+                for _, row in edited_df.iterrows():
+                    supabase.table("usuarios").update({
+                        "codigo_erp": str(row['codigo_erp']).strip(),
+                        "nombre_completo": str(row['nombre_completo']).strip(),
+                        "meta_mensual": float(row['meta_mensual']) if row['meta_mensual'] else 0.0
+                    }).eq("username", row['username']).execute()
+                st.success("¡Metas guardadas correctamente en la red!")
+                st.rerun()
+
+# ------------------------------------------
+# 7. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
 # ------------------------------------------
 if tab_admin_user is not None:
     with tab_admin_user:
