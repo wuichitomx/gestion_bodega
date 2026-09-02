@@ -746,300 +746,457 @@ if tab_rendimiento_m2 is not None:
     with tab_rendimiento_m2:
         st.header("📐 Rendimiento Monetario por Sub-ubicación ($ / m²)")
         st.markdown(
-            "Carga tu reporte de ventas a nivel de referencia (SKU). El sistema cruzará la venta neta con las ubicaciones escaneadas en Piso de Ventas, "
-            "y dividirá el valor monetario de cada mueble o góndola entre el total del tamaño de la tienda (**268.61 m²**)."
+            "Carga tu reporte de ventas del ERP. El rendimiento se calcula siempre sobre el total "
+            "de la tienda (**268.61 m²**)."
         )
-        st.info("💡 **Dato Inteligente:** La venta de códigos ubicados en múltiples muebles se prorratea proporcionalmente según la cantidad de piezas exhibidas en cada uno.")
-        
-        archivo_ventas_ref = st.file_uploader("📥 Subir: Extracto Referencia - Documento (Costo) [Excel]", type=["xlsx", "xls"], key="ventas_ref_m2")
+
+        M2_TIENDA_TOTAL = 268.61
+        archivo_ventas_ref = st.file_uploader(
+            "📥 Subir: Extracto Referencia - Documento (Costo) [Excel]",
+            type=["xlsx", "xls"],
+            key="ventas_ref_m2"
+        )
 
         if archivo_ventas_ref is not None:
-            with st.spinner("Analizando rendimiento por mueble de exhibición..."):
+            with st.spinner("Analizando rendimiento y ventas por categoría..."):
                 try:
-                    # Búsqueda dinámica de la fila de encabezados real
+                    # --------------------------------------------------
+                    # 1) LOCALIZAR LA FILA REAL DE ENCABEZADOS DEL ERP
+                    # --------------------------------------------------
                     df_ventas = None
-                    for h in range(10):
-                        df_temp = pd.read_excel(archivo_ventas_ref, header=h)
-                        if any(df_temp.columns.astype(str).str.contains('Referencia', case=False, na=False)) and \
-                           any(df_temp.columns.astype(str).str.contains('Venta Neta', case=False, na=False)):
-                            df_ventas = df_temp
-                            break
-                    
+                    columnas_requeridas = {"Referencia", "Venta Neta"}
+
+                    for h in range(15):
+                        try:
+                            archivo_ventas_ref.seek(0)
+                            df_temp = pd.read_excel(archivo_ventas_ref, header=h)
+                            df_temp.columns = df_temp.columns.astype(str).str.strip()
+
+                            if columnas_requeridas.issubset(set(df_temp.columns)):
+                                df_ventas = df_temp
+                                break
+                        except Exception:
+                            continue
+
                     if df_ventas is None:
-                        df_ventas = pd.read_excel(archivo_ventas_ref, header=2)
+                        raise ValueError(
+                            "No fue posible localizar las columnas 'Referencia' y 'Venta Neta' "
+                            "en el reporte ERP."
+                        )
 
                     df_ventas.columns = df_ventas.columns.astype(str).str.strip()
+                    df_ventas = df_ventas.dropna(subset=["Referencia"]).copy()
 
-                    if 'Referencia' not in df_ventas.columns or 'Venta Neta' not in df_ventas.columns:
-                        st.error("⚠️ El formato del archivo no coincide. Asegúrate de incluir las columnas 'Referencia' y 'Venta Neta'.")
+                    # --------------------------------------------------
+                    # 2) LIMPIEZA DE CAMPOS NUMÉRICOS
+                    # --------------------------------------------------
+                    def convertir_numero(serie):
+                        return pd.to_numeric(
+                            serie.astype(str)
+                            .str.replace(r"[^0-9.\-]", "", regex=True),
+                            errors="coerce"
+                        ).fillna(0)
+
+                    df_ventas["Venta Neta"] = convertir_numero(df_ventas["Venta Neta"])
+
+                    if "Unidades" in df_ventas.columns:
+                        df_ventas["Unidades"] = convertir_numero(df_ventas["Unidades"])
                     else:
-                        df_ventas = df_ventas.dropna(subset=['Referencia']).copy()
-                        df_ventas = df_ventas[
-                            ~df_ventas['Referencia'].astype(str).str.strip().str.lower().isin(['', 'nan', 'none', 'totales'])
-                        ].copy()
-                        
-                        # ======================================================
-                        # CRUCE CORRECTO: SKU EXACTO -> CÓDIGO ERP -> UBICACIÓN
-                        # ======================================================
-                        # El reporte trae la referencia completa (ej. JZ7205-M).
-                        # NO debemos cortar por '-' porque eso mezcla tallas/SKUs
-                        # distintos del mismo modelo.
-                        df_ventas['sku'] = (
-                            df_ventas['Referencia'].astype(str)
-                            .str.strip().str.upper()
+                        # Se mantiene la aplicación funcional si un reporte futuro no trae unidades.
+                        df_ventas["Unidades"] = 0
+
+                    # --------------------------------------------------
+                    # 3) SKU MAESTRO
+                    #    La referencia ERP contiene SKU + talla.
+                    #    Ejemplo: M20324-3 -> M20324
+                    # --------------------------------------------------
+                    df_ventas["sku_maestro"] = (
+                        df_ventas["Referencia"]
+                        .astype(str)
+                        .str.strip()
+                        .str.upper()
+                        .str[:6]
+                    )
+
+                    total_venta_erp = float(df_ventas["Venta Neta"].sum())
+                    rendimiento_global = total_venta_erp / M2_TIENDA_TOTAL
+
+                    # ==================================================
+                    # TARJETAS PRINCIPALES: SÓLO 3 MÉTRICAS
+                    # ==================================================
+                    st.divider()
+                    c1, c2, c3 = st.columns(3)
+
+                    c1.metric("💰 Venta Total ERP", f"${total_venta_erp:,.2f}")
+                    c2.metric("📐 M² Totales de la Tienda", f"{M2_TIENDA_TOTAL:,.2f} m²")
+                    c3.metric(
+                        "📈 Rendimiento Global",
+                        f"${rendimiento_global:,.2f} / m²"
+                    )
+
+                    # ==================================================
+                    # RESUMEN FOOTWEAR
+                    # El reporte ERP real ya trae Nivel 1, Nivel 2,
+                    # Unidades y Venta Neta; no necesita depender de
+                    # ubicaciones físicas ni del escaneo de cada zapato.
+                    # ==================================================
+                    st.divider()
+                    st.subheader("👟 Resumen de Ventas Footwear")
+                    st.caption(
+                        "Las ventas de calzado se obtienen directamente del reporte ERP y se "
+                        "clasifican por Nivel 1 / Nivel 2. El rendimiento se calcula como "
+                        "Venta Neta ÷ 268.61 m²."
+                    )
+
+                    if "Nivel 1" in df_ventas.columns and "Nivel 2" in df_ventas.columns:
+                        nivel1 = (
+                            df_ventas["Nivel 1"]
+                            .astype(str)
+                            .str.strip()
+                            .str.upper()
+                        )
+                        nivel2 = (
+                            df_ventas["Nivel 2"]
+                            .astype(str)
+                            .str.strip()
+                            .str.upper()
                         )
 
-                        # Limpieza robusta de la Venta Neta
-                        df_ventas['Venta Neta'] = pd.to_numeric(
-                            df_ventas['Venta Neta'].astype(str)
-                            .str.replace(r'[^0-9.\-]', '', regex=True),
-                            errors='coerce'
-                        ).fillna(0.0)
-
-                        # Consolidamos todo el periodo por SKU exacto.
-                        df_v_agrup = (
-                            df_ventas.groupby('sku', as_index=False)['Venta Neta']
-                            .sum()
-                            .rename(columns={'Venta Neta': 'Venta_Neta_SKU'})
+                        df_footwear = df_ventas[nivel1.eq("FOOTWEAR")].copy()
+                        nivel2_fw = (
+                            df_footwear["Nivel 2"]
+                            .astype(str)
+                            .str.strip()
+                            .str.upper()
                         )
 
-                        # Traemos el catálogo para convertir la Referencia/SKU
-                        # del ERP al codigo_limpio que utiliza el scanner.
-                        res_cat = supabase.table("catalogo_erp").select(
-                            "codigo_limpio, referencia, descripcion"
-                        ).execute()
-                        df_cat_m2 = pd.DataFrame(res_cat.data or [])
+                        # UNISEX primero para evitar clasificaciones ambiguas.
+                        clasificacion_fw = pd.Series("OTROS", index=df_footwear.index)
+                        clasificacion_fw.loc[nivel2_fw.str.contains("UNISEX", na=False)] = "Calzado Unisex"
+                        clasificacion_fw.loc[
+                            nivel2_fw.str.contains(r"\bWOMEN\b", regex=True, na=False)
+                        ] = "Calzado Mujer"
+                        clasificacion_fw.loc[
+                            nivel2_fw.str.contains(r"\bMEN\b", regex=True, na=False)
+                        ] = "Calzado Hombre"
 
-                        if df_cat_m2.empty or 'referencia' not in df_cat_m2.columns:
-                            st.error("⚠️ No se pudo cargar el catálogo ERP para relacionar las referencias con los códigos escaneados.")
+                        df_footwear["Categoria_Footwear"] = clasificacion_fw
+
+                        categorias_fw = [
+                            "Calzado Hombre",
+                            "Calzado Mujer",
+                            "Calzado Unisex"
+                        ]
+
+                        resumen_fw = (
+                            df_footwear[
+                                df_footwear["Categoria_Footwear"].isin(categorias_fw)
+                            ]
+                            .groupby("Categoria_Footwear", as_index=False)
+                            .agg(
+                                Piezas_Vendidas=("Unidades", "sum"),
+                                Venta_Neta=("Venta Neta", "sum")
+                            )
+                        )
+
+                        # Asegurar que siempre aparezcan las tres categorías.
+                        df_categorias = pd.DataFrame(
+                            {"Categoria_Footwear": categorias_fw}
+                        )
+                        resumen_fw = df_categorias.merge(
+                            resumen_fw,
+                            on="Categoria_Footwear",
+                            how="left"
+                        ).fillna({
+                            "Piezas_Vendidas": 0,
+                            "Venta_Neta": 0
+                        })
+
+                        resumen_fw["Piezas_Vendidas"] = (
+                            resumen_fw["Piezas_Vendidas"].round().astype(int)
+                        )
+                        resumen_fw["Rendimiento_m2"] = (
+                            resumen_fw["Venta_Neta"] / M2_TIENDA_TOTAL
+                        )
+
+                        fw_cols = st.columns(3)
+                        iconos_fw = {
+                            "Calzado Hombre": "👨",
+                            "Calzado Mujer": "👩",
+                            "Calzado Unisex": "👟"
+                        }
+
+                        for col, categoria in zip(fw_cols, categorias_fw):
+                            fila = resumen_fw[
+                                resumen_fw["Categoria_Footwear"] == categoria
+                            ].iloc[0]
+
+                            with col:
+                                st.markdown(f"### {iconos_fw[categoria]} {categoria}")
+                                st.metric(
+                                    "Piezas Vendidas",
+                                    f"{int(fila['Piezas_Vendidas']):,}"
+                                )
+                                st.metric(
+                                    "Venta Neta",
+                                    f"${fila['Venta_Neta']:,.2f}"
+                                )
+                                st.metric(
+                                    "Rendimiento",
+                                    f"${fila['Rendimiento_m2']:,.2f} / m²"
+                                )
+
+                        st.markdown("#### 📋 Detalle de Ventas Footwear")
+                        df_fw_mostrar = resumen_fw.rename(columns={
+                            "Categoria_Footwear": "Categoría",
+                            "Piezas_Vendidas": "Piezas Vendidas",
+                            "Venta_Neta": "Venta Neta ($)",
+                            "Rendimiento_m2": "Rendimiento por M² ($)"
+                        })
+
+                        st.dataframe(
+                            df_fw_mostrar.style.format({
+                                "Piezas Vendidas": "{:,.0f}",
+                                "Venta Neta ($)": "${:,.2f}",
+                                "Rendimiento por M² ($)": "${:,.2f}"
+                            }),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        st.warning(
+                            "El reporte cargado no contiene las columnas 'Nivel 1' y 'Nivel 2', "
+                            "por lo que no fue posible generar el resumen Footwear."
+                        )
+
+                    # ==================================================
+                    # RENDIMIENTO POR UBICACIÓN / MUEBLE
+                    # ==================================================
+                    st.divider()
+                    st.subheader("📊 Rendimiento por Sub-ubicación")
+
+                    # Catálogo: EAN/código -> Referencia -> SKU maestro.
+                    res_catalogo = supabase.table("catalogo_erp").select(
+                        "codigo_limpio,referencia"
+                    ).execute()
+                    df_catalogo = pd.DataFrame(res_catalogo.data)
+
+                    res_ubic_all = supabase.table("ubicaciones").select("*").execute()
+                    df_ubic_all = pd.DataFrame(res_ubic_all.data)
+
+                    if df_ubic_all.empty:
+                        st.warning("No hay ubicaciones escaneadas en la red aún.")
+                    elif df_catalogo.empty:
+                        st.warning(
+                            "No fue posible obtener el catálogo ERP para relacionar los EAN con sus SKUs."
+                        )
+                    else:
+                        if "ubicacion" not in df_ubic_all.columns:
+                            raise ValueError("La tabla de ubicaciones no contiene la columna 'ubicacion'.")
+                        if "codigo_limpio" not in df_ubic_all.columns:
+                            raise ValueError("La tabla de ubicaciones no contiene la columna 'codigo_limpio'.")
+                        if "cantidad" not in df_ubic_all.columns:
+                            raise ValueError("La tabla de ubicaciones no contiene la columna 'cantidad'.")
+
+                        ubi_up = (
+                            df_ubic_all["ubicacion"]
+                            .astype(str)
+                            .str.strip()
+                            .str.upper()
+                        )
+                        is_pv = (
+                            ubi_up.eq("PV")
+                            | ubi_up.str.startswith("PV -")
+                            | ubi_up.str.startswith("PV-")
+                        )
+                        df_pv = df_ubic_all[is_pv].copy()
+
+                        if df_pv.empty:
+                            st.warning(
+                                "No hay productos con ubicaciones de Piso de Ventas (PV) registrados."
+                            )
                         else:
-                            df_cat_m2['sku'] = (
-                                df_cat_m2['referencia'].astype(str)
-                                .str.strip().str.upper()
+                            # Normalización de EAN/código para el join.
+                            df_pv["codigo_match"] = (
+                                df_pv["codigo_limpio"]
+                                .astype(str)
+                                .str.strip()
+                                .str.replace(r"^['|]+", "", regex=True)
                             )
-                            df_cat_m2 = df_cat_m2.dropna(subset=['codigo_limpio', 'sku'])
-                            df_cat_m2 = df_cat_m2.drop_duplicates(subset=['sku'], keep='first')
-
-                            # Venta SKU -> codigo_limpio.
-                            df_v_sku = df_v_agrup.merge(
-                                df_cat_m2[['sku', 'codigo_limpio', 'descripcion']],
-                                on='sku', how='left'
+                            df_catalogo["codigo_match"] = (
+                                df_catalogo["codigo_limpio"]
+                                .astype(str)
+                                .str.strip()
+                                .str.replace(r"^['|]+", "", regex=True)
                             )
 
-                            res_ubic_all = supabase.table("ubicaciones").select(
-                                "codigo_limpio, ubicacion, cantidad"
-                            ).execute()
-                            df_ubic_all = pd.DataFrame(res_ubic_all.data or [])
+                            df_catalogo["sku_maestro"] = (
+                                df_catalogo["referencia"]
+                                .astype(str)
+                                .str.strip()
+                                .str.upper()
+                                .str[:6]
+                            )
 
-                            if df_ubic_all.empty:
-                                st.warning("No hay ubicaciones escaneadas en la red aún.")
-                            else:
-                                df_ubic_all['codigo_limpio'] = (
-                                    df_ubic_all['codigo_limpio'].astype(str).str.strip()
+                            # Evitar duplicar ubicaciones si el catálogo contiene repetidos.
+                            df_catalogo_join = (
+                                df_catalogo[
+                                    ["codigo_match", "referencia", "sku_maestro"]
+                                ]
+                                .drop_duplicates(subset=["codigo_match"])
+                            )
+
+                            df_pv = df_pv.merge(
+                                df_catalogo_join,
+                                on="codigo_match",
+                                how="left"
+                            )
+
+                            # Fallback: si el código escaneado ya parece una referencia,
+                            # conservar los primeros 6 caracteres como SKU maestro.
+                            df_pv["sku_maestro"] = df_pv["sku_maestro"].fillna(
+                                df_pv["codigo_match"]
+                                .astype(str)
+                                .str.strip()
+                                .str.upper()
+                                .str[:6]
+                            )
+
+                            # Ventas agrupadas por SKU maestro.
+                            df_v_agrup = (
+                                df_ventas.groupby("sku_maestro", as_index=False)
+                                .agg(
+                                    Venta_Neta=("Venta Neta", "sum"),
+                                    Piezas_Vendidas=("Unidades", "sum")
                                 )
-                                df_ubic_all['ubicacion'] = (
-                                    df_ubic_all['ubicacion'].astype(str).str.strip()
+                            )
+
+                            # Inventario físico total por SKU en todas las ubicaciones PV.
+                            totales_por_sku = (
+                                df_pv.groupby("sku_maestro", as_index=False)["cantidad"]
+                                .sum()
+                                .rename(columns={"cantidad": "total_piezas_pv"})
+                            )
+
+                            df_pv = df_pv.merge(
+                                totales_por_sku,
+                                on="sku_maestro",
+                                how="left"
+                            )
+                            df_pv = df_pv.merge(
+                                df_v_agrup,
+                                on="sku_maestro",
+                                how="left"
+                            )
+
+                            df_pv["Venta_Neta"] = df_pv["Venta_Neta"].fillna(0)
+                            df_pv["Piezas_Vendidas"] = df_pv["Piezas_Vendidas"].fillna(0)
+                            df_pv["total_piezas_pv"] = (
+                                df_pv["total_piezas_pv"].replace(0, 1).fillna(1)
+                            )
+
+                            # Prorrateo proporcional cuando un SKU está en varios muebles.
+                            df_pv["factor_atribucion"] = (
+                                df_pv["cantidad"] / df_pv["total_piezas_pv"]
+                            )
+                            df_pv["venta_atribuida"] = (
+                                df_pv["Venta_Neta"] * df_pv["factor_atribucion"]
+                            )
+                            df_pv["piezas_vendidas_atribuidas"] = (
+                                df_pv["Piezas_Vendidas"] * df_pv["factor_atribucion"]
+                            )
+
+                            resumen_muebles = (
+                                df_pv.groupby("ubicacion", as_index=False)
+                                .agg(
+                                    SKUs_Distintos=("sku_maestro", "nunique"),
+                                    Piezas_Fisicas=("cantidad", "sum"),
+                                    Piezas_Vendidas=("piezas_vendidas_atribuidas", "sum"),
+                                    Venta_Total=("venta_atribuida", "sum")
                                 )
-                                df_ubic_all['cantidad'] = pd.to_numeric(
-                                    df_ubic_all['cantidad'], errors='coerce'
-                                ).fillna(0.0)
+                            )
 
-                                # Sólo Piso de Ventas.
-                                ubi_up = df_ubic_all['ubicacion'].str.upper()
-                                is_pv = (
-                                    (ubi_up == 'PV') |
-                                    ubi_up.str.startswith('PV -') |
-                                    ubi_up.str.startswith('PV-')
-                                )
-                                df_pv = df_ubic_all[is_pv].copy()
+                            resumen_muebles["Rendimiento_m2"] = (
+                                resumen_muebles["Venta_Total"] / M2_TIENDA_TOTAL
+                            )
+                            resumen_muebles = resumen_muebles.sort_values(
+                                "Rendimiento_m2",
+                                ascending=False
+                            ).reset_index(drop=True)
 
-                                if df_pv.empty:
-                                    st.warning("No hay productos con ubicaciones de Piso de Ventas (PV) registrados en el escáner.")
-                                else:
-                                    # Agrupamos primero SKU + mueble, por si el scanner
-                                    # generó más de un registro para el mismo SKU en la misma ubicación.
-                                    df_pv = (
-                                        df_pv.groupby(['codigo_limpio', 'ubicacion'], as_index=False)['cantidad']
-                                        .sum()
+                            chart_m2 = alt.Chart(resumen_muebles).mark_bar(
+                                cornerRadiusTopLeft=4,
+                                cornerRadiusTopRight=4
+                            ).encode(
+                                x=alt.X(
+                                    "ubicacion:N",
+                                    sort="-y",
+                                    title="Ubicación en Piso de Ventas",
+                                    axis=alt.Axis(labelAngle=-45)
+                                ),
+                                y=alt.Y(
+                                    "Rendimiento_m2:Q",
+                                    title="Rendimiento ($ / m²)"
+                                ),
+                                tooltip=[
+                                    alt.Tooltip("ubicacion:N", title="Mueble/Área"),
+                                    alt.Tooltip("SKUs_Distintos:Q", title="SKUs Diferentes"),
+                                    alt.Tooltip("Piezas_Fisicas:Q", title="Total Piezas"),
+                                    alt.Tooltip(
+                                        "Piezas_Vendidas:Q",
+                                        title="Piezas Vendidas",
+                                        format=",.2f"
+                                    ),
+                                    alt.Tooltip(
+                                        "Venta_Total:Q",
+                                        title="Venta Generada ($)",
+                                        format=",.2f"
+                                    ),
+                                    alt.Tooltip(
+                                        "Rendimiento_m2:Q",
+                                        title="Rendimiento ($/m²)",
+                                        format=",.2f"
                                     )
+                                ]
+                            )
 
-                                    # Cruzamos cada ubicación con la venta del SKU exacto.
-                                    df_pv = df_pv.merge(
-                                        df_v_sku[['sku', 'codigo_limpio', 'Venta_Neta_SKU', 'descripcion']],
-                                        on='codigo_limpio', how='left'
-                                    )
+                            st.altair_chart(
+                                chart_m2.properties(height=450),
+                                use_container_width=True
+                            )
 
-                                    df_pv['Venta_Neta_SKU'] = pd.to_numeric(
-                                        df_pv['Venta_Neta_SKU'], errors='coerce'
-                                    ).fillna(0.0)
+                            st.markdown("### 📋 Desglose Completo de Sub-ubicaciones")
 
-                                    # Para cada SKU, la venta se reparte entre los muebles
-                                    # proporcionalmente a las piezas exhibidas.
-                                    total_piezas_por_sku = (
-                                        df_pv.groupby('codigo_limpio')['cantidad']
-                                        .transform('sum')
-                                    )
-                                    df_pv['factor_ubicacion'] = (
-                                        df_pv['cantidad'] / total_piezas_por_sku.replace(0, 1)
-                                    )
-                                    df_pv['venta_atribuida'] = (
-                                        df_pv['Venta_Neta_SKU'] * df_pv['factor_ubicacion']
-                                    )
+                            df_mostrar = resumen_muebles.rename(columns={
+                                "ubicacion": "Ubicación / Mueble",
+                                "SKUs_Distintos": "SKUs Diferentes Exhibidos",
+                                "Piezas_Fisicas": "Total Piezas",
+                                "Piezas_Vendidas": "Total Piezas Vendidas",
+                                "Venta_Total": "Venta Generada ($)",
+                                "Rendimiento_m2": "Rendimiento por M² de Tienda ($)"
+                            }).copy()
 
-                                    # SKU exacto = referencia completa del ERP.
-                                    # Un mismo SKU puede estar en varios muebles.
-                                    # Por eso el nunique se hace sobre sku, no sobre modelo_base.
-                                    resumen_muebles = (
-                                        df_pv.groupby('ubicacion')
-                                        .agg(
-                                            SKUs_Distintos=('sku', 'nunique'),
-                                            Piezas_Fisicas=('cantidad', 'sum'),
-                                            Venta_Total=('venta_atribuida', 'sum')
-                                        )
-                                        .reset_index()
-                                    )
+                            df_mostrar["Total Piezas Vendidas"] = (
+                                df_mostrar["Total Piezas Vendidas"].round(2)
+                            )
 
-                                    # 268.61 m² es el área TOTAL de la tienda,
-                                    # tal como definiste el indicador.
-                                    M2_TIENDA_TOTAL = 268.61
-                                    resumen_muebles['Rendimiento_m2'] = (
-                                        resumen_muebles['Venta_Total'] / M2_TIENDA_TOTAL
-                                    )
-                                    resumen_muebles = (
-                                        resumen_muebles
-                                        .sort_values('Rendimiento_m2', ascending=False)
-                                        .reset_index(drop=True)
-                                    )
-
-                                    # --------------------------------------------------
-                                    # Indicadores de control del cruce
-                                    # --------------------------------------------------
-                                    venta_erp_total = df_v_agrup['Venta_Neta_SKU'].sum()
-                                    venta_sku_sin_catalogo = df_v_sku.loc[
-                                        df_v_sku['codigo_limpio'].isna(), 'Venta_Neta_SKU'
-                                    ].sum()
-                                    codigos_en_pv = set(df_pv['codigo_limpio'].dropna().astype(str))
-                                    venta_sku_con_catalogo_sin_pv = df_v_sku.loc[
-                                        df_v_sku['codigo_limpio'].notna() &
-                                        ~df_v_sku['codigo_limpio'].astype(str).isin(codigos_en_pv),
-                                        'Venta_Neta_SKU'
-                                    ].sum()
-                                    total_venta_atribuida = resumen_muebles['Venta_Total'].sum()
-
-                                    st.divider()
-                                    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                                    col_m1.metric(
-                                        "Venta Atribuida a Exhibición",
-                                        f"${total_venta_atribuida:,.2f}"
-                                    )
-                                    col_m2.metric(
-                                        "Venta Neta ERP",
-                                        f"${venta_erp_total:,.2f}"
-                                    )
-                                    col_m3.metric(
-                                        "Cobertura Venta → PV",
-                                        f"{(total_venta_atribuida / venta_erp_total * 100) if venta_erp_total else 0:,.1f}%"
-                                    )
-                                    col_m4.metric(
-                                        "Rendimiento Global PV",
-                                        f"${total_venta_atribuida / M2_TIENDA_TOTAL:,.2f} / m²"
-                                    )
-
-                                    if venta_sku_sin_catalogo or venta_sku_con_catalogo_sin_pv:
-                                        with st.expander("🔎 Diagnóstico del cruce ERP ↔ Scanner"):
-                                            st.write(
-                                                f"Venta de SKUs que no encontraron código en catálogo: ${venta_sku_sin_catalogo:,.2f}"
-                                            )
-                                            st.write(
-                                                f"Venta de SKUs con catálogo, pero sin ubicación PV: ${venta_sku_con_catalogo_sin_pv:,.2f}"
-                                            )
-                                            st.caption(
-                                                "Estas ventas no se asignan a ningún mueble porque no existe evidencia de una ubicación PV en el scanner."
-                                            )
-
-                                    st.markdown("---")
-                                    st.subheader("📊 Comparativo de Rendimiento por Sub-ubicación ($ / m²)")
-
-                                    chart_m2 = alt.Chart(resumen_muebles).mark_bar(
-                                        cornerRadiusTopLeft=4,
-                                        cornerRadiusTopRight=4,
-                                        color='#39FF88'
-                                    ).encode(
-                                        x=alt.X(
-                                            'ubicacion:N',
-                                            sort='-y',
-                                            title='Ubicación en Piso de Ventas',
-                                            axis=alt.Axis(labelAngle=-45)
-                                        ),
-                                        y=alt.Y(
-                                            'Rendimiento_m2:Q',
-                                            title='Rendimiento ($ / m²)'
-                                        ),
-                                        tooltip=[
-                                            alt.Tooltip('ubicacion:N', title='Mueble/Área'),
-                                            alt.Tooltip('SKUs_Distintos:Q', title='SKUs Distintos'),
-                                            alt.Tooltip('Piezas_Fisicas:Q', title='Piezas Físicas'),
-                                            alt.Tooltip('Venta_Total:Q', title='Venta Generada ($)', format=',.2f'),
-                                            alt.Tooltip('Rendimiento_m2:Q', title='Rendimiento ($/m²)', format=',.2f')
-                                        ]
-                                    )
-                                    text_m2 = chart_m2.mark_text(
-                                        align='center', baseline='bottom', dy=-5, color='white'
-                                    ).encode(
-                                        text=alt.Text('Rendimiento_m2:Q', format='$,.2f')
-                                    )
-                                    st.altair_chart(
-                                        (chart_m2 + text_m2).properties(height=450),
-                                        use_container_width=True
-                                    )
-
-                                    st.markdown("---")
-                                    st.subheader("📋 Desglose Completo de Sub-ubicaciones")
-
-                                    df_mostrar = resumen_muebles.rename(columns={
-                                        'ubicacion': 'Ubicación / Mueble',
-                                        'SKUs_Distintos': 'SKUs Diferentes Exhibidos',
-                                        'Piezas_Fisicas': 'Total Piezas',
-                                        'Venta_Total': 'Venta Generada ($)',
-                                        'Rendimiento_m2': 'Rendimiento por M² de Tienda ($)'
-                                    })
-
-                                    st.dataframe(
-                                        df_mostrar.style.format({
-                                            'Venta Generada ($)': '${:,.2f}',
-                                            'Rendimiento por M² de Tienda ($)': '${:,.2f}'
-                                        }),
-                                        use_container_width=True,
-                                        hide_index=True
-                                    )
-
-                                    with st.expander("🧩 Ver detalle SKU → Mueble"):
-                                        detalle_m2 = df_pv[[
-                                            'sku', 'codigo_limpio', 'descripcion', 'ubicacion',
-                                            'cantidad', 'Venta_Neta_SKU', 'factor_ubicacion', 'venta_atribuida'
-                                        ]].copy()
-                                        detalle_m2 = detalle_m2.rename(columns={
-                                            'sku': 'SKU / Referencia',
-                                            'codigo_limpio': 'Código Escaneado',
-                                            'descripcion': 'Descripción',
-                                            'ubicacion': 'Ubicación / Mueble',
-                                            'cantidad': 'Piezas Exhibidas',
-                                            'Venta_Neta_SKU': 'Venta Neta del SKU ($)',
-                                            'factor_ubicacion': '% Atribución',
-                                            'venta_atribuida': 'Venta Atribuida ($)'
-                                        })
-                                        st.dataframe(
-                                            detalle_m2.style.format({
-                                                'Venta Neta del SKU ($)': '${:,.2f}',
-                                                '% Atribución': '{:.1%}',
-                                                'Venta Atribuida ($)': '${:,.2f}'
-                                            }),
-                                            use_container_width=True,
-                                            hide_index=True
-                                        )
+                            st.dataframe(
+                                df_mostrar.style.format({
+                                    "Total Piezas": "{:,.0f}",
+                                    "Total Piezas Vendidas": "{:,.2f}",
+                                    "Venta Generada ($)": "${:,.2f}",
+                                    "Rendimiento por M² de Tienda ($)": "${:,.2f}"
+                                }),
+                                use_container_width=True,
+                                hide_index=True
+                            )
 
                 except Exception as e:
-                    st.error(f"⚠️ Hubo un error al procesar el archivo. Asegúrate de que sea el reporte correcto. (Detalle técnico: {e})")
+                    st.error(
+                        "⚠️ Hubo un error al procesar el archivo. "
+                        f"Detalle técnico: {e}"
+                    )
+
 
 # ------------------------------------------
 # 5. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
