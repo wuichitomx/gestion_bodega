@@ -974,7 +974,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.27 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.27.1 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -1004,7 +1004,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.27 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.27.1 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -1342,45 +1342,10 @@ with st.sidebar:
             key="pagina_menu_asesor",
         )
 
-paginas_disponibles = (
-    [pagina for grupo in paginas_admin.values() for pagina in grupo]
-    if st.session_state.es_admin
-    else ["📊 Dashboard", "🔍 Búsqueda Manual"]
-)
-orden_pestanas = [pagina_actual] + [
-    pagina for pagina in paginas_disponibles if pagina != pagina_actual
-]
-pestanas = st.tabs(orden_pestanas)
-pestana_por_nombre = dict(zip(orden_pestanas, pestanas))
-
-# La navegación se controla desde el menú lateral; las pestañas sirven únicamente
-# como contenedores internos para conservar la estructura actual de cada pantalla.
-st.markdown(
-    """
-    <style>
-    div[data-testid="stTabs"] div[data-baseweb="tab-list"] {
-        display: none;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-tab_perf = pestana_por_nombre["📊 Dashboard"]
-tab_busqueda = pestana_por_nombre["🔍 Búsqueda Manual"]
-tab_resumen_pv = pestana_por_nombre.get("📈 Resumen PV")
-tab_rendimiento_m2 = pestana_por_nombre.get("📐 Rendimiento m²")
-tab_escaneo = pestana_por_nombre.get("📦 Scanner Rápido")
-tab_cargas_erp = pestana_por_nombre.get("📥 Cargas ERP e inventario")
-tab_precios = pestana_por_nombre.get("💲 Lista de precios")
-tab_promociones = pestana_por_nombre.get("🏷️ Promociones")
-tab_metas = pestana_por_nombre.get("🎯 Metas por asesor")
-tab_admin_user = pestana_por_nombre.get("👥 Gestión Usuarios")
-
 # ------------------------------------------
 # 1. PESTAÑA: PERFORMANCE & KPIS (DASHBOARD)
 # ------------------------------------------
-with tab_perf:
+if pagina_actual == "📊 Dashboard":
     if not os.path.exists("ventas_diarias_temp.csv"):
         st.header("📊 Tablero de Rendimiento Diario")
         st.info("ℹ️ No se ha cargado el reporte de ventas del día. El administrador puede subirlo en '📥 Cargas ERP e inventario'.")
@@ -1532,7 +1497,7 @@ with tab_perf:
 # ------------------------------------------
 # 2. PESTAÑA: BÚSQUEDA MANUAL
 # ------------------------------------------
-with tab_busqueda:
+if pagina_actual == "🔍 Búsqueda Manual":
     col1, col2, col3 = st.columns(3)
     in_ref = col1.text_input("🔍 Ref/Desc:", key="in_ref")
     in_talla = col2.text_input("📏 Talla:", key="in_talla")
@@ -1661,15 +1626,15 @@ with tab_busqueda:
 # ------------------------------------------
 # 3. PESTAÑA: RESUMEN EJECUTIVO (PV) (SÓLO ADMIN)
 # ------------------------------------------
-if tab_resumen_pv is not None:
-    with tab_resumen_pv:
+if pagina_actual == "📈 Resumen PV":
+    if st.session_state.es_admin:
         mostrar_resumen_piso_ventas(supabase)
 
 # ------------------------------------------
 # 4. PESTAÑA: RENDIMIENTO M2 (SÓLO ADMIN)
 # ------------------------------------------
-if tab_rendimiento_m2 is not None:
-    with tab_rendimiento_m2:
+if pagina_actual == "📐 Rendimiento m²":
+    if st.session_state.es_admin:
         st.header("📐 Rendimiento Monetario por Sub-ubicación ($ / m²)")
         st.markdown(
             "Carga tu reporte de ventas del ERP. El rendimiento se calcula siempre sobre el total "
@@ -2127,8 +2092,8 @@ if tab_rendimiento_m2 is not None:
 # ------------------------------------------
 # 5. PESTAÑA: SCANNER RÁPIDO (SÓLO ADMIN)
 # ------------------------------------------
-if tab_escaneo is not None:
-    with tab_escaneo:
+if pagina_actual == "📦 Scanner Rápido":
+    if st.session_state.es_admin:
         codigo = st.text_input("Escanea o escribe el código de barras:", key="scan")
         if codigo:
             prod = supabase.table("catalogo_erp").select("*").eq("codigo_limpio", codigo.strip()).execute().data
@@ -2141,8 +2106,8 @@ if tab_escaneo is not None:
 # ------------------------------------------
 # 6. PESTAÑA: CARGAS ERP E INVENTARIO (SÓLO ADMIN)
 # ------------------------------------------
-if tab_cargas_erp is not None:
-    with tab_cargas_erp:
+if pagina_actual == "📥 Cargas ERP e inventario":
+    if st.session_state.es_admin:
         st.subheader("📥 Cargar Reporte de Ventas Diario del ERP (Excel)")
         archivo_sales = st.file_uploader("Subir Archivo Excel de Ventas", type=["xlsx", "xls"], key="sales_excel")
         
@@ -2279,8 +2244,8 @@ if tab_cargas_erp is not None:
 # ------------------------------------------
 # 7. PESTAÑA: LISTA DE PRECIOS (SÓLO ADMIN)
 # ------------------------------------------
-if tab_precios is not None:
-    with tab_precios:
+if pagina_actual == "💲 Lista de precios":
+    if st.session_state.es_admin:
         st.subheader("💲 Actualizar Lista de Precios ERP")
         st.info(
             "Carga la lista de precios en formato Excel (.xlsx). Se utilizarán automáticamente "
@@ -2400,8 +2365,8 @@ if tab_precios is not None:
 # ------------------------------------------
 # 8. PESTAÑA: PROMOCIONES (SÓLO ADMIN)
 # ------------------------------------------
-if tab_promociones is not None:
-    with tab_promociones:
+if pagina_actual == "🏷️ Promociones":
+    if st.session_state.es_admin:
         st.subheader("🏷️ Crear Nueva Promoción")
         st.info(
             "Define la campaña y carga un Excel con una columna Modelo, SKU o Referencia. "
@@ -2736,8 +2701,8 @@ if tab_promociones is not None:
 # ------------------------------------------
 # 9. PESTAÑA: METAS POR ASESOR (SÓLO ADMIN)
 # ------------------------------------------
-if tab_metas is not None:
-    with tab_metas:
+if pagina_actual == "🎯 Metas por asesor":
+    if st.session_state.es_admin:
         st.subheader("⚙️ Configuración de Metas por Asesor")
         
         res_u = supabase.table("usuarios").select("*").execute().data
@@ -2771,8 +2736,8 @@ if tab_metas is not None:
 # ------------------------------------------
 # 10. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
 # ------------------------------------------
-if tab_admin_user is not None:
-    with tab_admin_user:
+if pagina_actual == "👥 Gestión Usuarios":
+    if st.session_state.es_admin:
         st.subheader("👥 Agregar Usuario")
         with st.form("nuevo_u"):
             col_u1, col_u2 = st.columns(2)
