@@ -1,6 +1,11 @@
 import os
 import io
 import base64
+import hashlib
+import html
+import re
+import unicodedata
+from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -10,6 +15,687 @@ from PIL import Image, ImageOps
 
 # Importamos las reglas maestras desde nuestro archivo de configuración
 from configuracion_ia import generar_prompt_maestro
+
+
+def _normalizar_encabezado(valor):
+    """Normaliza encabezados del ERP para poder reconocer variantes comunes."""
+    if pd.isna(valor):
+        return ""
+    texto = unicodedata.normalize("NFKD", str(valor))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", " ", texto.lower()).strip()
+
+
+def _normalizar_precio(valor):
+    """Convierte importes numéricos o con formato regional a float."""
+    if pd.isna(valor):
+        return None
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        return float(valor)
+
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    negativo = texto.startswith("(") and texto.endswith(")")
+    texto = re.sub(r"[^0-9,.-]", "", texto)
+    if texto.count("-") > 1:
+        return None
+    texto = texto.replace("-", "")
+    if not texto:
+        return None
+
+    if "," in texto and "." in texto:
+        decimal = "," if texto.rfind(",") > texto.rfind(".") else "."
+        miles = "." if decimal == "," else ","
+        texto = texto.replace(miles, "").replace(decimal, ".")
+    elif "," in texto:
+        partes = texto.split(",")
+        texto = "".join(partes) if len(partes[-1]) == 3 else "".join(partes[:-1]) + "." + partes[-1]
+    elif texto.count(".") > 1:
+        partes = texto.split(".")
+        texto = "".join(partes) if len(partes[-1]) == 3 else "".join(partes[:-1]) + "." + partes[-1]
+
+    try:
+        numero = float(texto)
+        return -numero if negativo else numero
+    except ValueError:
+        return None
+
+
+def _separar_referencia(referencia):
+    """Obtiene SKU maestro y talla desde el último sufijo de la referencia."""
+    referencia = str(referencia).strip().upper().strip("-")
+    if "-" not in referencia:
+        return referencia, ""
+    sku_maestro, talla = referencia.rsplit("-", 1)
+    return sku_maestro.strip(), talla.strip()
+
+
+def preparar_lista_precios_excel(archivo):
+    """Detecta el encabezado real y prepara la lista de precios para validación."""
+    bruto = pd.read_excel(archivo, header=None, dtype=object)
+    aliases = {
+        "referencia": {"referencia", "ref", "codigo referencia", "referencia articulo", "referencia producto"},
+        "descripcion": {"descripcion", "descripcion articulo", "descripcion producto", "nombre articulo", "producto"},
+        "precio": {
+            "lista publico", "lista de publico", "precio publico", "precio de publico",
+            "precio lista", "precio de lista", "pvp", "precio venta", "precio venta publico"
+        },
+    }
+
+    fila_encabezado = None
+    indices = None
+    for numero_fila, fila in bruto.head(60).iterrows():
+        normalizados = [_normalizar_encabezado(valor) for valor in fila.tolist()]
+        encontrados = {}
+        for destino, opciones in aliases.items():
+            for indice, encabezado in enumerate(normalizados):
+                if encabezado in opciones:
+                    encontrados[destino] = indice
+                    break
+        if len(encontrados) == len(aliases):
+            fila_encabezado, indices = numero_fila, encontrados
+            break
+
+        # Algunos reportes ERP agrupan "Matriz Referencia" sobre varias columnas
+        # y sólo rotulan la columna de precio. En ese diseño, Referencia y
+        # Descripción son las dos columnas inmediatamente anteriores al precio.
+        indice_precio = None
+        for indice, encabezado in enumerate(normalizados):
+            if encabezado in aliases["precio"]:
+                indice_precio = indice
+                break
+        if indice_precio is not None and indice_precio >= 2:
+            muestra = bruto.iloc[numero_fila + 1:min(numero_fila + 11, len(bruto))]
+            tiene_referencia = muestra.iloc[:, indice_precio - 2].notna().any()
+            tiene_descripcion = muestra.iloc[:, indice_precio - 1].notna().any()
+            if tiene_referencia and tiene_descripcion:
+                fila_encabezado = numero_fila
+                indices = {
+                    "referencia": indice_precio - 2,
+                    "descripcion": indice_precio - 1,
+                    "precio": indice_precio,
+                }
+                break
+
+    if fila_encabezado is None:
+        raise ValueError(
+            "No se encontró una fila con Referencia, Descripción y Lista Público (o encabezados equivalentes) "
+            "en las primeras 60 filas."
+        )
+
+    datos = bruto.iloc[fila_encabezado + 1:, [indices["referencia"], indices["descripcion"], indices["precio"]]].copy()
+    datos.columns = ["referencia", "descripcion", "precio_original"]
+    datos["referencia"] = datos["referencia"].where(datos["referencia"].notna(), "").astype(str).str.strip().str.upper()
+    datos["descripcion"] = datos["descripcion"].where(datos["descripcion"].notna(), "").astype(str).str.strip()
+    datos["precio_lista"] = datos["precio_original"].apply(_normalizar_precio)
+    datos[["sku_maestro", "talla"]] = datos["referencia"].apply(
+        lambda valor: pd.Series(_separar_referencia(valor))
+    )
+
+    vacias = datos["referencia"].eq("")
+    precios_invalidos = datos["precio_lista"].isna() | (datos["precio_lista"] < 0)
+    duplicadas = datos["referencia"].ne("") & datos["referencia"].duplicated(keep="last")
+    validas = datos.loc[~vacias & ~precios_invalidos & ~duplicadas].copy()
+    validas["precio_lista"] = validas["precio_lista"].round(2)
+    validas = validas[["referencia", "descripcion", "talla", "sku_maestro", "precio_lista"]]
+
+    conteos = {
+        "filas_leidas": len(datos),
+        "referencias_vacias": int(vacias.sum()),
+        "precios_invalidos": int((precios_invalidos & ~vacias).sum()),
+        "duplicados_descartados": int(duplicadas.sum()),
+        "registros_validos": len(validas),
+        "fila_encabezado": int(fila_encabezado) + 1,
+    }
+    return validas, conteos
+
+
+def _normalizar_sku_maestro(valor):
+    """Normaliza un modelo o referencia al SKU maestro de seis caracteres."""
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).strip().upper()
+    if re.fullmatch(r"\d+\.0", texto):
+        texto = texto[:-2]
+    texto = texto.split("-", 1)[0].strip()
+    texto = re.sub(r"\s+", "", texto)
+    return texto[:6]
+
+
+def _normalizar_descuento(valor):
+    """Convierte descuentos como 40, 40% o 0.40 a porcentaje entre 0 y 100."""
+    if pd.isna(valor):
+        return None
+    texto = str(valor).strip().replace("%", "").replace(",", ".")
+    try:
+        descuento = float(texto)
+    except ValueError:
+        return None
+    if 0 < descuento <= 1:
+        descuento *= 100
+    if descuento < 0 or descuento > 100:
+        return None
+    return round(descuento, 2)
+
+
+def preparar_productos_promocion_excel(archivo, descuento_general=None):
+    """Extrae modelos y descuentos generales o individuales desde un Excel."""
+    bruto = pd.read_excel(archivo, header=None, dtype=object)
+    aliases_modelo = {"modelo", "sku", "sku maestro", "referencia", "codigo modelo"}
+    aliases_descripcion = {"descripcion", "producto", "nombre producto"}
+    aliases_descuento = {"descuento", "descuento porcentaje", "porcentaje", "porcentaje descuento", "off"}
+    fila_encabezado = None
+    indice_modelo = None
+    indice_descripcion = None
+    indice_descuento = None
+
+    for numero_fila, fila in bruto.head(60).iterrows():
+        encabezados = [_normalizar_encabezado(valor) for valor in fila.tolist()]
+        for indice, encabezado in enumerate(encabezados):
+            if indice_modelo is None and encabezado in aliases_modelo:
+                indice_modelo = indice
+            if indice_descripcion is None and encabezado in aliases_descripcion:
+                indice_descripcion = indice
+            if indice_descuento is None and encabezado in aliases_descuento:
+                indice_descuento = indice
+        if indice_modelo is not None:
+            fila_encabezado = numero_fila
+            break
+        indice_descripcion = None
+        indice_descuento = None
+
+    if fila_encabezado is None:
+        raise ValueError("No se encontró una columna Modelo, SKU o Referencia en las primeras 60 filas.")
+
+    datos = pd.DataFrame()
+    datos["sku_maestro"] = bruto.iloc[fila_encabezado + 1:, indice_modelo].apply(_normalizar_sku_maestro)
+    if indice_descripcion is not None:
+        datos["descripcion_archivo"] = (
+            bruto.iloc[fila_encabezado + 1:, indice_descripcion]
+            .where(bruto.iloc[fila_encabezado + 1:, indice_descripcion].notna(), "")
+            .astype(str)
+            .str.strip()
+            .values
+        )
+    else:
+        datos["descripcion_archivo"] = ""
+
+    if descuento_general is None:
+        if indice_descuento is None:
+            raise ValueError(
+                "El modo individual requiere una columna Descuento, % Descuento o Porcentaje."
+            )
+        datos["descuento_porcentaje"] = bruto.iloc[
+            fila_encabezado + 1:, indice_descuento
+        ].apply(_normalizar_descuento).values
+    else:
+        descuento = _normalizar_descuento(descuento_general)
+        if descuento is None:
+            raise ValueError("El descuento general debe estar entre 0 y 100.")
+        datos["descuento_porcentaje"] = descuento
+
+    modelos_vacios = datos["sku_maestro"].eq("")
+    descuentos_invalidos = datos["descuento_porcentaje"].isna()
+    duplicados = datos["sku_maestro"].ne("") & datos["sku_maestro"].duplicated(keep="last")
+    validos = datos.loc[~modelos_vacios & ~descuentos_invalidos & ~duplicados].copy()
+    validos = validos[["sku_maestro", "descripcion_archivo", "descuento_porcentaje"]]
+    conteos = {
+        "filas_leidas": len(datos),
+        "modelos_vacios": int(modelos_vacios.sum()),
+        "descuentos_invalidos": int((descuentos_invalidos & ~modelos_vacios).sum()),
+        "duplicados_descartados": int(duplicados.sum()),
+        "modelos_validos": len(validos),
+        "fila_encabezado": int(fila_encabezado) + 1,
+    }
+    return validos, conteos
+
+
+def clasificar_estado_promocion(promocion, hoy=None):
+    """Devuelve el estado operativo de una promoción sin alterar su historial."""
+    hoy = hoy or datetime.now().date()
+    if not promocion.get("activa", False):
+        return "Desactivada", "⚫"
+    fecha_inicio = pd.to_datetime(promocion.get("fecha_inicio"), errors="coerce")
+    fecha_fin = pd.to_datetime(promocion.get("fecha_fin"), errors="coerce")
+    if pd.isna(fecha_inicio):
+        return "Fecha inválida", "⚠️"
+    if hoy < fecha_inicio.date():
+        return "Programada", "🔵"
+    if pd.notna(fecha_fin) and hoy > fecha_fin.date():
+        return "Finalizada", "🟠"
+    return "Activa", "🟢"
+
+
+def obtener_promociones_con_conteos(tamano_pagina=1000):
+    """Consulta campañas y cuenta todos sus modelos mediante paginación."""
+    respuesta = (
+        supabase.table("promociones")
+        .select("id,nombre,descripcion,fecha_inicio,fecha_fin,activa,created_at,updated_at")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    promociones = respuesta.data or []
+    conteos = {}
+    inicio = 0
+    while True:
+        pagina_respuesta = (
+            supabase.table("promocion_productos")
+            .select("promocion_id")
+            .range(inicio, inicio + tamano_pagina - 1)
+            .execute()
+        )
+        pagina = pagina_respuesta.data or []
+        for producto in pagina:
+            promocion_id = str(producto.get("promocion_id") or "")
+            if promocion_id:
+                conteos[promocion_id] = conteos.get(promocion_id, 0) + 1
+        if len(pagina) < tamano_pagina:
+            break
+        inicio += tamano_pagina
+    return promociones, conteos
+
+
+def obtener_productos_de_promocion(promocion_id, tamano_pagina=1000):
+    """Obtiene todos los modelos de una campaña para consulta y exportación."""
+    productos = []
+    inicio = 0
+    while True:
+        respuesta = (
+            supabase.table("promocion_productos")
+            .select("sku_maestro,descuento_porcentaje,created_at")
+            .eq("promocion_id", promocion_id)
+            .order("sku_maestro")
+            .range(inicio, inicio + tamano_pagina - 1)
+            .execute()
+        )
+        pagina = respuesta.data or []
+        productos.extend(pagina)
+        if len(pagina) < tamano_pagina:
+            break
+        inicio += tamano_pagina
+    return pd.DataFrame(productos)
+
+
+def crear_reporte_promocion_excel(promocion, productos, estado):
+    """Genera en memoria un Excel histórico con resumen y detalle de modelos."""
+    resumen = pd.DataFrame([{
+        "Promoción": promocion.get("nombre"),
+        "Descripción": promocion.get("descripcion") or "",
+        "Fecha de inicio": promocion.get("fecha_inicio"),
+        "Fecha de término": promocion.get("fecha_fin") or "",
+        "Estado": estado,
+        "Activa manualmente": "Sí" if promocion.get("activa") else "No",
+        "Cantidad de modelos": len(productos),
+        "Fecha de creación": promocion.get("created_at") or "",
+        "Última actualización": promocion.get("updated_at") or "",
+    }])
+    detalle = productos.rename(columns={
+        "sku_maestro": "SKU maestro",
+        "descuento_porcentaje": "Descuento (%)",
+        "created_at": "Fecha de registro",
+    })
+    salida = io.BytesIO()
+    with pd.ExcelWriter(salida, engine="openpyxl") as escritor:
+        resumen.to_excel(escritor, sheet_name="Resumen", index=False)
+        detalle.to_excel(escritor, sheet_name="Productos", index=False)
+        for hoja in escritor.book.worksheets:
+            hoja.freeze_panes = "A2"
+            hoja.auto_filter.ref = hoja.dimensions
+            for columna in hoja.columns:
+                ancho = min(max(len(str(celda.value or "")) for celda in columna) + 2, 45)
+                hoja.column_dimensions[columna[0].column_letter].width = max(ancho, 12)
+    salida.seek(0)
+    return salida.getvalue()
+
+
+def enriquecer_resultados_con_precios_promociones(df_resultados):
+    """Agrega precio y la mejor promoción vigente sin interrumpir la búsqueda base."""
+    resultado = df_resultados.copy()
+    resultado["sku_maestro"] = resultado["referencia"].apply(_normalizar_sku_maestro)
+    resultado["precio_lista"] = pd.NA
+    resultado["promocion"] = None
+    resultado["descuento_porcentaje"] = pd.NA
+    resultado["precio_final"] = pd.NA
+    resultado["vigencia_promocion"] = None
+    avisos = []
+
+    try:
+        referencias = resultado["referencia"].dropna().astype(str).str.strip().str.upper().unique().tolist()
+        if referencias:
+            respuesta_precios = (
+                supabase.table("lista_precios")
+                .select("referencia,precio_lista")
+                .in_("referencia", referencias)
+                .execute()
+            )
+            mapa_precios = {
+                str(fila["referencia"]).strip().upper(): float(fila["precio_lista"])
+                for fila in (respuesta_precios.data or [])
+                if fila.get("referencia") and fila.get("precio_lista") is not None
+            }
+            resultado["precio_lista"] = resultado["referencia"].astype(str).str.strip().str.upper().map(mapa_precios)
+    except Exception as ex:
+        avisos.append(f"No fue posible consultar la lista de precios: {ex}")
+
+    try:
+        hoy = datetime.now().date()
+        respuesta_promociones = (
+            supabase.table("promociones")
+            .select("id,nombre,fecha_inicio,fecha_fin,activa")
+            .eq("activa", True)
+            .execute()
+        )
+        promociones_vigentes = {}
+        for promocion in (respuesta_promociones.data or []):
+            fecha_inicio = pd.to_datetime(promocion.get("fecha_inicio"), errors="coerce")
+            fecha_fin = pd.to_datetime(promocion.get("fecha_fin"), errors="coerce")
+            if pd.isna(fecha_inicio):
+                continue
+            inicio = fecha_inicio.date()
+            fin = fecha_fin.date() if pd.notna(fecha_fin) else None
+            if inicio <= hoy and (fin is None or hoy <= fin):
+                promociones_vigentes[str(promocion["id"])] = promocion
+
+        skus = resultado["sku_maestro"].dropna().astype(str).unique().tolist()
+        if promociones_vigentes and skus:
+            respuesta_productos = (
+                supabase.table("promocion_productos")
+                .select("promocion_id,sku_maestro,descuento_porcentaje")
+                .in_("promocion_id", list(promociones_vigentes))
+                .in_("sku_maestro", skus)
+                .execute()
+            )
+            candidatos = {}
+            coincidencias_multiples = set()
+            for producto_promocion in (respuesta_productos.data or []):
+                sku = _normalizar_sku_maestro(producto_promocion.get("sku_maestro"))
+                promocion_id = str(producto_promocion.get("promocion_id"))
+                promocion = promociones_vigentes.get(promocion_id)
+                descuento = _normalizar_descuento(producto_promocion.get("descuento_porcentaje"))
+                if not sku or not promocion or descuento is None:
+                    continue
+                candidato = (descuento, promocion)
+                if sku in candidatos:
+                    coincidencias_multiples.add(sku)
+                if sku not in candidatos or descuento > candidatos[sku][0]:
+                    candidatos[sku] = candidato
+
+            if coincidencias_multiples:
+                avisos.append(
+                    f"{len(coincidencias_multiples)} SKU coinciden con varias promociones vigentes; "
+                    "se aplicó el mayor descuento."
+                )
+
+            for indice, fila in resultado.iterrows():
+                candidato = candidatos.get(fila["sku_maestro"])
+                if not candidato:
+                    continue
+                descuento, promocion = candidato
+                resultado.at[indice, "promocion"] = promocion["nombre"]
+                resultado.at[indice, "descuento_porcentaje"] = descuento
+                fecha_fin_texto = promocion.get("fecha_fin") or "Sin fecha de término"
+                resultado.at[indice, "vigencia_promocion"] = (
+                    f"{promocion['fecha_inicio']} a {fecha_fin_texto}"
+                )
+                precio = pd.to_numeric(fila["precio_lista"], errors="coerce")
+                if pd.notna(precio):
+                    resultado.at[indice, "precio_final"] = round(
+                        float(precio) * (1 - descuento / 100),
+                        2,
+                    )
+    except Exception as ex:
+        avisos.append(f"No fue posible consultar las promociones: {ex}")
+
+    return resultado, avisos
+
+
+def construir_tarjetas_resultados(df_resultados, es_admin=False):
+    """Construye tarjetas compactas por SKU maestro con tallas y ubicaciones."""
+    if df_resultados.empty:
+        return ""
+
+    def texto_seguro(valor, predeterminado="—"):
+        if pd.isna(valor) or str(valor).strip() in {"", "None", "nan"}:
+            return html.escape(predeterminado)
+        return html.escape(str(valor).strip())
+
+    def primer_numero(serie):
+        numeros = pd.to_numeric(serie, errors="coerce").dropna()
+        return float(numeros.iloc[0]) if not numeros.empty else None
+
+    tarjetas = []
+    for sku_maestro, grupo in df_resultados.groupby("sku_maestro", sort=False, dropna=False):
+        primera_fila = grupo.iloc[0]
+        sku_texto = texto_seguro(sku_maestro, primera_fila.get("referencia", "Sin referencia"))
+        descripcion = texto_seguro(primera_fila.get("descripcion"), "Sin descripción")
+        categoria = texto_seguro(primera_fila.get("nivel1"), "General")
+        precio_lista = primer_numero(grupo["precio_lista"])
+        precio_final = primer_numero(grupo["precio_final"])
+        descuento = primer_numero(grupo["descuento_porcentaje"])
+        promociones = grupo["promocion"].dropna().astype(str).str.strip()
+        nombre_promocion = texto_seguro(promociones.iloc[0]) if not promociones.empty else ""
+
+        if precio_lista is None:
+            bloque_precio = '<span class="sinapsis-price-missing">Precio no disponible</span>'
+        elif descuento is not None and precio_final is not None:
+            bloque_precio = (
+                f'<span class="sinapsis-price-old">${precio_lista:,.2f}</span>'
+                f'<span class="sinapsis-promo-badge">-{descuento:g}% · {nombre_promocion}</span>'
+                f'<span class="sinapsis-price-final">${precio_final:,.2f}</span>'
+            )
+        else:
+            bloque_precio = f'<span class="sinapsis-price-final">${precio_lista:,.2f}</span>'
+
+        variantes = []
+        for talla, grupo_talla in grupo.groupby("talla", sort=False, dropna=False):
+            ubicaciones = []
+            for ubicacion in grupo_talla["ubicacion"].dropna().astype(str):
+                ubicacion = ubicacion.strip()
+                if ubicacion and ubicacion not in ubicaciones:
+                    ubicaciones.append(ubicacion)
+            ubicacion_texto = texto_seguro(", ".join(ubicaciones), "Sin ubicación registrada")
+            stock = pd.to_numeric(
+                grupo_talla.get("stock_sistema", pd.Series(dtype=float)),
+                errors="coerce",
+            ).fillna(0).sum()
+            codigo_html = ""
+            if es_admin and "codigo_limpio" in grupo_talla.columns:
+                codigos = grupo_talla["codigo_limpio"].dropna().astype(str).unique().tolist()
+                if codigos:
+                    codigo_html = (
+                        f'<span class="sinapsis-variant-code">Código: '
+                        f'{texto_seguro(", ".join(codigos))}</span>'
+                    )
+            variantes.append(
+                '<div class="sinapsis-variant">'
+                f'<div class="sinapsis-variant-top"><strong>Talla {texto_seguro(talla)}</strong>'
+                f'<span>{stock:g} pza</span></div>'
+                f'<div class="sinapsis-location">📍 {ubicacion_texto}</div>'
+                f'{codigo_html}</div>'
+            )
+
+        tarjetas.append(
+            '<article class="sinapsis-product-card">'
+            '<div class="sinapsis-product-header">'
+            f'<div><div class="sinapsis-product-sku">{sku_texto}</div>'
+            f'<div class="sinapsis-product-name">{descripcion}</div>'
+            f'<div class="sinapsis-product-category">{categoria}</div></div>'
+            f'<div class="sinapsis-price-block">{bloque_precio}</div>'
+            '</div>'
+            f'<div class="sinapsis-variants">{"".join(variantes)}</div>'
+            '</article>'
+        )
+
+    return '<div class="sinapsis-results-grid">' + "".join(tarjetas) + "</div>"
+
+
+def preparar_referencias_inventario_excel(archivo):
+    """Lee el inventario ERP en Excel y devuelve referencias con existencia positiva."""
+    bruto = pd.read_excel(archivo, header=None, dtype=object)
+    aliases_referencia = {"referencia", "ref", "codigo referencia", "referencia articulo"}
+    aliases_existencia = {
+        "cantidad", "existencia", "existencias", "stock", "stock sistema", "unidades disponibles"
+    }
+    fila_encabezado = None
+    indice_referencia = None
+    indice_existencia = None
+
+    for numero_fila, fila in bruto.head(60).iterrows():
+        normalizados = [_normalizar_encabezado(valor) for valor in fila.tolist()]
+        for indice, encabezado in enumerate(normalizados):
+            if indice_referencia is None and encabezado in aliases_referencia:
+                indice_referencia = indice
+            if indice_existencia is None and encabezado in aliases_existencia:
+                indice_existencia = indice
+        if indice_referencia is not None and indice_existencia is not None:
+            # En el Excel nativo del ERP, "Referencia" puede ser un encabezado
+            # combinado. El valor real queda en la última columna de ese bloque.
+            siguientes_encabezados = [
+                indice for indice in range(indice_referencia + 1, len(normalizados))
+                if normalizados[indice]
+            ]
+            if siguientes_encabezados and siguientes_encabezados[0] - indice_referencia > 1:
+                indice_referencia = siguientes_encabezados[0] - 1
+            fila_encabezado = numero_fila
+            break
+        indice_referencia = None
+        indice_existencia = None
+
+    if fila_encabezado is None:
+        raise ValueError(
+            "No se encontró una fila con Referencia y Cantidad (o encabezados equivalentes) "
+            "en las primeras 60 filas del inventario."
+        )
+
+    datos = bruto.iloc[fila_encabezado + 1:, [indice_referencia, indice_existencia]].copy()
+    datos.columns = ["referencia", "existencia"]
+    datos["referencia"] = (
+        datos["referencia"]
+        .where(datos["referencia"].notna(), "")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    datos["existencia"] = pd.to_numeric(
+        datos["existencia"].astype(str).str.replace(",", "", regex=False),
+        errors="coerce",
+    ).fillna(0)
+    activas = datos[datos["referencia"].ne("") & datos["existencia"].gt(0)]
+    referencias_activas = set(activas["referencia"])
+    conteos = {
+        "filas_inventario": len(datos),
+        "referencias_con_existencia": len(referencias_activas),
+        "piezas_con_existencia": float(activas["existencia"].sum()),
+        "fila_encabezado_inventario": int(fila_encabezado) + 1,
+    }
+    return referencias_activas, conteos
+
+
+def preparar_catalogo_inventario_excel(archivo):
+    """Prepara el catálogo completo, incluyendo el formato de encabezados combinados del ERP."""
+    bruto = pd.read_excel(archivo, header=None, dtype=object)
+    fila_encabezado = None
+    indices = None
+    aliases = {
+        "referencia": {"referencia", "ref", "codigo referencia", "referencia articulo"},
+        "codigo_limpio": {"codigo alterno", "codigoalterno", "codigo de barras"},
+        "descripcion": {"descripcion", "descripcion articulo", "descripcion producto"},
+        "stock_sistema": {"cantidad", "existencia", "existencias", "stock", "stock sistema", "unidades disponibles"},
+    }
+
+    for numero_fila, fila in bruto.head(60).iterrows():
+        encabezados = [_normalizar_encabezado(valor) for valor in fila.tolist()]
+        encontrados = {}
+        for destino, opciones in aliases.items():
+            for indice, encabezado in enumerate(encabezados):
+                if encabezado in opciones:
+                    encontrados[destino] = indice
+                    break
+        if len(encontrados) != len(aliases):
+            continue
+
+        indice_referencia = encontrados["referencia"]
+        indice_codigo = encontrados["codigo_limpio"]
+        if indice_codigo - indice_referencia > 1:
+            indice_referencia = indice_codigo - 1
+
+        indices = {
+            **encontrados,
+            "referencia": indice_referencia,
+        }
+        niveles = {}
+        for numero_nivel in range(1, 5):
+            nombre = f"nivel{numero_nivel}"
+            if nombre in encabezados:
+                niveles[nombre] = encabezados.index(nombre)
+        if len(niveles) < 4 and indice_referencia >= 5:
+            niveles = {
+                "nivel1": indice_referencia - 5,
+                "nivel2": indice_referencia - 4,
+                "nivel3": indice_referencia - 2,
+                "nivel4": indice_referencia - 1,
+            }
+        indices.update(niveles)
+        fila_encabezado = numero_fila
+        break
+
+    if fila_encabezado is None or indices is None:
+        raise ValueError(
+            "No se localizaron Referencia, Código Alterno, Descripción y existencias "
+            "en las primeras 60 filas del catálogo."
+        )
+
+    columnas = [
+        "codigo_limpio", "referencia", "descripcion",
+        "nivel1", "nivel2", "nivel3", "nivel4", "stock_sistema",
+    ]
+    datos = pd.DataFrame(index=bruto.index[fila_encabezado + 1:])
+    for columna in columnas:
+        datos[columna] = bruto.iloc[fila_encabezado + 1:, indices[columna]].values
+
+    for columna in ["codigo_limpio", "referencia", "descripcion", "nivel1", "nivel2", "nivel3", "nivel4"]:
+        datos[columna] = datos[columna].where(datos[columna].notna(), "").astype(str).str.strip()
+    datos["referencia"] = datos["referencia"].str.upper()
+    datos["stock_sistema"] = pd.to_numeric(
+        datos["stock_sistema"].astype(str).str.replace(",", "", regex=False),
+        errors="coerce",
+    ).fillna(0).astype(int)
+    datos = datos[datos["codigo_limpio"].ne("") & datos["referencia"].ne("")].copy()
+    datos["talla"] = datos["referencia"].apply(lambda valor: _separar_referencia(valor)[1])
+    datos = datos.drop_duplicates(subset=["codigo_limpio"], keep="last")
+
+    activas = datos[datos["stock_sistema"].gt(0)]
+    referencias_activas = set(activas["referencia"])
+    conteos = {
+        "filas_inventario": len(datos),
+        "referencias_con_existencia": len(referencias_activas),
+        "piezas_con_existencia": float(activas["stock_sistema"].sum()),
+        "fila_encabezado_inventario": int(fila_encabezado) + 1,
+    }
+    return datos, referencias_activas, conteos
+
+
+def obtener_codigos_catalogo_supabase(tamano_pagina=1000):
+    """Obtiene todos los códigos actuales para detectar registros ausentes del nuevo catálogo."""
+    codigos = set()
+    inicio = 0
+    while True:
+        respuesta = (
+            supabase.table("catalogo_erp")
+            .select("codigo_limpio")
+            .range(inicio, inicio + tamano_pagina - 1)
+            .execute()
+        )
+        pagina = respuesta.data or []
+        for registro in pagina:
+            codigo = str(registro.get("codigo_limpio") or "").strip()
+            if codigo:
+                codigos.add(codigo)
+        if len(pagina) < tamano_pagina:
+            break
+        inicio += tamano_pagina
+    return codigos
 
 st.set_page_config(page_title="Sinapsis", page_icon="⚡", layout="wide")
 
@@ -121,6 +807,136 @@ st.markdown("""
         font-family: 'Orbitron', sans-serif !important;
     }
 
+    .sinapsis-results-grid {
+        display: grid;
+        gap: 16px;
+        margin: 12px 0 20px;
+    }
+
+    .sinapsis-product-card {
+        background: linear-gradient(135deg, rgba(0, 217, 245, 0.055), rgba(57, 255, 136, 0.075));
+        border: 1px solid rgba(0, 217, 245, 0.25);
+        border-left: 5px solid #39FF88;
+        border-radius: 16px;
+        padding: 18px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    }
+
+    .sinapsis-product-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 14px;
+    }
+
+    .sinapsis-product-sku {
+        color: #39FF88;
+        font-family: 'Orbitron', sans-serif;
+        font-size: 1.15rem;
+        font-weight: 800;
+        letter-spacing: 0.6px;
+    }
+
+    .sinapsis-product-name {
+        font-size: 1rem;
+        font-weight: 600;
+        margin-top: 3px;
+    }
+
+    .sinapsis-product-category,
+    .sinapsis-variant-code,
+    .sinapsis-price-missing {
+        color: rgba(128, 128, 128, 0.95);
+        font-size: 0.82rem;
+        margin-top: 3px;
+    }
+
+    .sinapsis-price-block {
+        display: flex;
+        align-items: flex-end;
+        flex-direction: column;
+        gap: 3px;
+        min-width: max-content;
+    }
+
+    .sinapsis-price-old {
+        color: #FFFFFF;
+        font-size: 0.92rem;
+        font-weight: 600;
+        text-decoration: line-through;
+        text-decoration-thickness: 2px;
+        text-decoration-color: rgba(255, 255, 255, 0.8);
+    }
+
+    .sinapsis-price-final {
+        color: #39FF88;
+        font-family: 'Orbitron', sans-serif;
+        font-size: 1.25rem;
+        font-weight: 800;
+    }
+
+    .sinapsis-promo-badge {
+        background: rgba(255, 179, 0, 0.16);
+        color: #ffb300;
+        border: 1px solid rgba(255, 179, 0, 0.38);
+        border-radius: 999px;
+        padding: 3px 9px;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .sinapsis-variants {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 9px;
+    }
+
+    .sinapsis-variant {
+        background: rgba(128, 128, 128, 0.075);
+        border: 1px solid rgba(128, 128, 128, 0.2);
+        border-radius: 10px;
+        padding: 10px 12px;
+    }
+
+    .sinapsis-variant-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        color: inherit;
+    }
+
+    .sinapsis-variant-top span {
+        color: #39FF88;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .sinapsis-location {
+        margin-top: 6px;
+        font-size: 0.88rem;
+        overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 640px) {
+        .sinapsis-product-card {
+            padding: 14px;
+        }
+
+        .sinapsis-product-header {
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .sinapsis-price-block {
+            align-items: flex-start;
+        }
+
+        .sinapsis-variants {
+            grid-template-columns: 1fr;
+        }
+    }
+
     .login-title {
         font-family: 'Orbitron', sans-serif !important;
         font-size: 2rem !important;
@@ -158,7 +974,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.26 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.27 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -188,7 +1004,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.26 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.27 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -487,13 +1303,79 @@ if os.path.exists("ventas_diarias_temp.csv"):
             st.balloons()
             st.session_state.felicitacion_mostrada = True
 
-if st.session_state.es_admin:
-    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual", "📈 Resumen PV", "📐 Rendimiento m²", "📦 Scanner Rápido", "⚙️ Admin & Carga ERP", "👥 Gestión Usuarios"])
-    tab_perf, tab_busqueda, tab_resumen_pv, tab_rendimiento_m2, tab_escaneo, tab_admin_erp, tab_admin_user = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5], tabs[6]
-else:
-    tabs = st.tabs(["📊 Dashboard", "🔍 Búsqueda Manual"])
-    tab_perf, tab_busqueda = tabs[0], tabs[1]
-    tab_resumen_pv, tab_rendimiento_m2, tab_escaneo, tab_admin_erp, tab_admin_user = None, None, None, None, None
+paginas_admin = {
+    "📊 Operación": [
+        "📊 Dashboard",
+        "📈 Resumen PV",
+        "📐 Rendimiento m²",
+    ],
+    "📦 Inventario y consulta": [
+        "🔍 Búsqueda Manual",
+        "📦 Scanner Rápido",
+    ],
+    "⚙️ Administración": [
+        "📥 Cargas ERP e inventario",
+        "💲 Lista de precios",
+        "🏷️ Promociones",
+        "🎯 Metas por asesor",
+        "👥 Gestión Usuarios",
+    ],
+}
+
+with st.sidebar:
+    st.markdown("#### 🧭 Menú principal")
+    if st.session_state.es_admin:
+        seccion_menu = st.selectbox(
+            "Sección",
+            options=list(paginas_admin.keys()),
+            key="seccion_menu_admin",
+        )
+        pagina_actual = st.radio(
+            "Pantalla",
+            options=paginas_admin[seccion_menu],
+            key=f"pagina_menu_{seccion_menu}",
+        )
+    else:
+        pagina_actual = st.radio(
+            "Pantalla",
+            options=["📊 Dashboard", "🔍 Búsqueda Manual"],
+            key="pagina_menu_asesor",
+        )
+
+paginas_disponibles = (
+    [pagina for grupo in paginas_admin.values() for pagina in grupo]
+    if st.session_state.es_admin
+    else ["📊 Dashboard", "🔍 Búsqueda Manual"]
+)
+orden_pestanas = [pagina_actual] + [
+    pagina for pagina in paginas_disponibles if pagina != pagina_actual
+]
+pestanas = st.tabs(orden_pestanas)
+pestana_por_nombre = dict(zip(orden_pestanas, pestanas))
+
+# La navegación se controla desde el menú lateral; las pestañas sirven únicamente
+# como contenedores internos para conservar la estructura actual de cada pantalla.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stTabs"] div[data-baseweb="tab-list"] {
+        display: none;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+tab_perf = pestana_por_nombre["📊 Dashboard"]
+tab_busqueda = pestana_por_nombre["🔍 Búsqueda Manual"]
+tab_resumen_pv = pestana_por_nombre.get("📈 Resumen PV")
+tab_rendimiento_m2 = pestana_por_nombre.get("📐 Rendimiento m²")
+tab_escaneo = pestana_por_nombre.get("📦 Scanner Rápido")
+tab_cargas_erp = pestana_por_nombre.get("📥 Cargas ERP e inventario")
+tab_precios = pestana_por_nombre.get("💲 Lista de precios")
+tab_promociones = pestana_por_nombre.get("🏷️ Promociones")
+tab_metas = pestana_por_nombre.get("🎯 Metas por asesor")
+tab_admin_user = pestana_por_nombre.get("👥 Gestión Usuarios")
 
 # ------------------------------------------
 # 1. PESTAÑA: PERFORMANCE & KPIS (DASHBOARD)
@@ -501,7 +1383,7 @@ else:
 with tab_perf:
     if not os.path.exists("ventas_diarias_temp.csv"):
         st.header("📊 Tablero de Rendimiento Diario")
-        st.info("ℹ️ No se ha cargado el reporte de ventas del día. El administrador puede subirlo en la pestaña '⚙️ Admin & Carga ERP'.")
+        st.info("ℹ️ No se ha cargado el reporte de ventas del día. El administrador puede subirlo en '📥 Cargas ERP e inventario'.")
     else:
         df_v = pd.read_csv("ventas_diarias_temp.csv")
         res_u = supabase.table("usuarios").select("*").execute().data
@@ -704,13 +1586,57 @@ with tab_busqueda:
             else:
                 df['ubicacion'] = None
             df['ubicacion'] = df['ubicacion'].fillna("Sin ubicación registrada")
+            df, avisos_precios = enriquecer_resultados_con_precios_promociones(df)
 
             st.success(f"⚡ Se conectaron {len(df)} artículos en la red.")
 
+            promociones_encontradas = df["promocion"].dropna().astype(str).unique().tolist()
+            if promociones_encontradas:
+                st.success(
+                    "🔥 Promoción vigente: " + ", ".join(promociones_encontradas)
+                )
+            for aviso_precio in avisos_precios:
+                if st.session_state.es_admin:
+                    st.warning(aviso_precio)
+
+            st.markdown(
+                construir_tarjetas_resultados(
+                    df,
+                    es_admin=st.session_state.es_admin,
+                ),
+                unsafe_allow_html=True,
+            )
+
             if st.session_state.es_admin:
-                st.dataframe(df[['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'stock_sistema', 'ubicacion']], use_container_width=True)
-            else:
-                st.dataframe(df[['referencia', 'descripcion', 'talla', 'ubicacion']], use_container_width=True)
+                with st.expander("Ver detalle técnico en tabla", expanded=False):
+                    columnas_resultado = [
+                        'codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1',
+                        'stock_sistema', 'ubicacion', 'precio_lista', 'promocion',
+                        'descuento_porcentaje', 'precio_final'
+                    ]
+                    df_mostrar = df[columnas_resultado].rename(columns={
+                        'codigo_limpio': 'Código',
+                        'referencia': 'Referencia',
+                        'descripcion': 'Descripción',
+                        'talla': 'Talla',
+                        'nivel1': 'Categoría',
+                        'stock_sistema': 'Stock sistema',
+                        'ubicacion': 'Ubicación',
+                        'precio_lista': 'Precio de lista',
+                        'promocion': 'Promoción',
+                        'descuento_porcentaje': 'Descuento (%)',
+                        'precio_final': 'Precio final',
+                    })
+                    st.dataframe(
+                        df_mostrar,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Precio de lista": st.column_config.NumberColumn(format="$%.2f"),
+                            "Descuento (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                            "Precio final": st.column_config.NumberColumn(format="$%.2f"),
+                        },
+                    )
             
             ref_raw = df.iloc[0]['referencia']
             codigo_detectado = str(ref_raw).split('-')[0].strip()
@@ -1213,10 +2139,10 @@ if tab_escaneo is not None:
                 st.warning("Producto no encontrado en el núcleo.")
 
 # ------------------------------------------
-# 6. PESTAÑA: ADMIN & CARGA ERP (SÓLO ADMIN)
+# 6. PESTAÑA: CARGAS ERP E INVENTARIO (SÓLO ADMIN)
 # ------------------------------------------
-if tab_admin_erp is not None:
-    with tab_admin_erp:
+if tab_cargas_erp is not None:
+    with tab_cargas_erp:
         st.subheader("📥 Cargar Reporte de Ventas Diario del ERP (Excel)")
         archivo_sales = st.file_uploader("Subir Archivo Excel de Ventas", type=["xlsx", "xls"], key="sales_excel")
         
@@ -1259,45 +2185,47 @@ if tab_admin_erp is not None:
         st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
         st.info("Sube aquí el archivo de tu ERP (RPInv_Extracto_Referencia) en formato Excel para sincronizar la red en Supabase.")
 
-        archivo_catalogo = st.file_uploader("Subir Catálogo (Excel)", type=["xlsx", "xls"], key="cat_csv")
+        archivo_catalogo = st.file_uploader("Subir Catálogo (.xlsx)", type=["xlsx"], key="cat_csv")
 
         if archivo_catalogo is not None:
             if st.button("⚡ Sincronizar Catálogo en la Nube"):
                 try:
                     with st.spinner("Estableciendo sinapsis y sincronizando el núcleo... Esto puede tomar unos segundos."):
-                        df_cat = pd.read_excel(archivo_catalogo, skiprows=5, dtype=str)
-                        
-                        mapeo_columnas = {
-                            'CodigoAlterno': 'codigo_limpio',
-                            'Referencia': 'referencia',
-                            'Descripcion': 'descripcion',
-                            'Cantidad': 'stock_sistema',
-                            'Nivel1': 'nivel1',
-                            'Nivel2': 'nivel2',
-                            'Nivel3': 'nivel3',
-                            'Nivel4': 'nivel4'
-                        }
-                        
-                        df_cat = df_cat.rename(columns=mapeo_columnas)
-                        
-                        if 'referencia' in df_cat.columns:
-                            df_cat['talla'] = df_cat['referencia'].apply(lambda x: str(x).split('-', 1)[1] if '-' in str(x) else '')
+                        contenido_catalogo = archivo_catalogo.getvalue()
+                        df_cat, referencias_activas_catalogo, validacion_catalogo = preparar_catalogo_inventario_excel(
+                            io.BytesIO(contenido_catalogo)
+                        )
+                        columnas_obligatorias = {"codigo_limpio", "referencia", "stock_sistema"}
+                        columnas_faltantes = columnas_obligatorias - set(df_cat.columns)
+                        if columnas_faltantes:
+                            raise ValueError(
+                                "El catálogo no contiene las columnas necesarias: "
+                                + ", ".join(sorted(columnas_faltantes))
+                            )
                         
                         columnas_esperadas = ['codigo_limpio', 'referencia', 'descripcion', 'talla', 'nivel1', 'nivel2', 'nivel3', 'nivel4', 'stock_sistema']
                         columnas_existentes = [col for col in columnas_esperadas if col in df_cat.columns]
                         df_cat = df_cat[columnas_existentes]
                         
-                        if 'stock_sistema' in df_cat.columns:
-                            df_cat['stock_sistema'] = pd.to_numeric(df_cat['stock_sistema'], errors='coerce').fillna(0).astype(int)
-                        
                         if 'codigo_limpio' in df_cat.columns:
                             df_cat = df_cat.dropna(subset=['codigo_limpio'])
+                            df_cat['codigo_limpio'] = df_cat['codigo_limpio'].astype(str).str.strip()
+                            df_cat = df_cat[df_cat['codigo_limpio'].ne('')]
                         
                         df_cat = df_cat.astype(object).where(pd.notna(df_cat), None)
                         registros = df_cat.to_dict(orient="records")
 
                         TAMANO_BLOQUE = 500
                         total_registros = len(registros)
+                        if total_registros == 0:
+                            raise ValueError("El catálogo no contiene registros válidos para sincronizar.")
+
+                        codigos_catalogo_anterior = obtener_codigos_catalogo_supabase()
+                        codigos_catalogo_nuevo = {
+                            str(registro["codigo_limpio"]).strip()
+                            for registro in registros
+                            if registro.get("codigo_limpio")
+                        }
                         
                         barra_progreso = st.progress(0, text=f"Sincronizando 0 de {total_registros} artículos...")
 
@@ -1310,11 +2238,506 @@ if tab_admin_erp is not None:
                             barra_progreso.progress(porcentaje, text=f"Sincronizando {subidos} de {total_registros} artículos...")
 
                         barra_progreso.empty()
-                        st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {total_registros} artículos.")
+                        codigos_ausentes = sorted(codigos_catalogo_anterior - codigos_catalogo_nuevo)
+                        total_ausentes = len(codigos_ausentes)
+                        if total_ausentes:
+                            barra_limpieza = st.progress(
+                                0,
+                                text=f"Actualizando a cero 0 de {total_ausentes} artículos antiguos...",
+                            )
+                            tamano_bloque_limpieza = 200
+                            for inicio in range(0, total_ausentes, tamano_bloque_limpieza):
+                                bloque_ausentes = codigos_ausentes[inicio:inicio + tamano_bloque_limpieza]
+                                (
+                                    supabase.table("catalogo_erp")
+                                    .update({"stock_sistema": 0})
+                                    .in_("codigo_limpio", bloque_ausentes)
+                                    .execute()
+                                )
+                                actualizados = min(inicio + tamano_bloque_limpieza, total_ausentes)
+                                barra_limpieza.progress(
+                                    actualizados / total_ausentes,
+                                    text=(
+                                        f"Actualizando a cero {actualizados} de "
+                                        f"{total_ausentes} artículos antiguos..."
+                                    ),
+                                )
+                            barra_limpieza.empty()
+
+                        st.session_state.inventario_actual_precios = {
+                            "archivo": hashlib.sha256(contenido_catalogo).hexdigest(),
+                            "referencias": referencias_activas_catalogo,
+                            "validacion": validacion_catalogo,
+                        }
+                        st.success(
+                            f"⚡ ¡Núcleo actualizado! Se sincronizaron {total_registros} artículos "
+                            f"y {total_ausentes} códigos antiguos quedaron con existencia cero."
+                        )
                 except Exception as ex:
                     st.error(f"⚠️ Error al sincronizar: {ex}")
-        
+
+# ------------------------------------------
+# 7. PESTAÑA: LISTA DE PRECIOS (SÓLO ADMIN)
+# ------------------------------------------
+if tab_precios is not None:
+    with tab_precios:
+        st.subheader("💲 Actualizar Lista de Precios ERP")
+        st.info(
+            "Carga la lista de precios en formato Excel (.xlsx). Se utilizarán automáticamente "
+            "las referencias con existencia del catálogo sincronizado arriba durante esta sesión."
+        )
+        archivo_precios = st.file_uploader(
+            "Subir Lista de Precios (.xlsx)",
+            type=["xlsx"],
+            key="price_list_excel",
+        )
+        inventario_actual_precios = st.session_state.get("inventario_actual_precios")
+        if inventario_actual_precios:
+            st.success(
+                f"Catálogo actual disponible: "
+                f"{inventario_actual_precios['validacion']['referencias_con_existencia']} "
+                "referencias con existencia."
+            )
+        else:
+            st.warning(
+                "Primero sincroniza el catálogo de inventario de arriba en esta misma sesión "
+                "para habilitar el cruce de precios."
+            )
+
+        if archivo_precios is not None and inventario_actual_precios:
+            try:
+                contenido_precios = archivo_precios.getvalue()
+                identificador_archivo = hashlib.sha256(
+                    contenido_precios + inventario_actual_precios["archivo"].encode("ascii")
+                ).hexdigest()
+                cache_precios = st.session_state.get("lista_precios_procesada")
+
+                if not cache_precios or cache_precios["archivo"] != identificador_archivo:
+                    with st.spinner("Leyendo precios y cruzando productos con existencia..."):
+                        df_precios_completa, validacion_precios = preparar_lista_precios_excel(
+                            io.BytesIO(contenido_precios)
+                        )
+                        referencias_con_existencia = inventario_actual_precios["referencias"]
+                        validacion_inventario = inventario_actual_precios["validacion"]
+                        referencias_con_precio = set(df_precios_completa["referencia"])
+                        df_precios = df_precios_completa[
+                            df_precios_completa["referencia"].isin(referencias_con_existencia)
+                        ].copy()
+                        validacion_precios.update(validacion_inventario)
+                        validacion_precios["activos_sin_precio"] = len(
+                            referencias_con_existencia - referencias_con_precio
+                        )
+                        validacion_precios["registros_a_sincronizar"] = len(df_precios)
+                        st.session_state.lista_precios_procesada = {
+                            "archivo": identificador_archivo,
+                            "datos": df_precios,
+                            "validacion": validacion_precios,
+                        }
+                else:
+                    df_precios = cache_precios["datos"]
+                    validacion_precios = cache_precios["validacion"]
+
+                st.caption(
+                    f"Encabezados detectados: precios en fila {validacion_precios['fila_encabezado']} "
+                    f"e inventario en fila {validacion_precios['fila_encabezado_inventario']}."
+                )
+                col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
+                col_p1.metric("Precios válidos", validacion_precios["registros_validos"])
+                col_p2.metric("Con existencia", validacion_precios["referencias_con_existencia"])
+                col_p3.metric(
+                    "A sincronizar",
+                    validacion_precios["registros_a_sincronizar"],
+                )
+                col_p4.metric("Activos sin precio", validacion_precios["activos_sin_precio"])
+                col_p5.metric(
+                    "Filas inválidas",
+                    validacion_precios["referencias_vacias"] + validacion_precios["precios_invalidos"],
+                )
+
+                st.markdown("**Vista previa de productos con existencia que se sincronizarán**")
+                st.dataframe(df_precios.head(100), use_container_width=True, hide_index=True)
+                if len(df_precios) > 100:
+                    st.caption(f"Se muestran 100 de {len(df_precios)} registros que se sincronizarán.")
+                if validacion_precios["activos_sin_precio"]:
+                    st.warning(
+                        f"{validacion_precios['activos_sin_precio']} referencias con existencia no tienen "
+                        "un precio coincidente en el archivo y no se sincronizarán."
+                    )
+
+                confirmar_precios = st.checkbox(
+                    "Confirmo que revisé la vista previa y deseo actualizar `lista_precios`.",
+                    key="confirm_price_upload",
+                )
+                if st.button(
+                    "⚡ Sincronizar Lista de Precios",
+                    disabled=not confirmar_precios or df_precios.empty,
+                    key="sync_price_list",
+                ):
+                    fecha_actualizacion = datetime.now(timezone.utc).isoformat()
+                    df_precios_subida = df_precios.assign(fecha_actualizacion=fecha_actualizacion)
+                    df_precios_subida = df_precios_subida.astype(object).where(pd.notna(df_precios_subida), None)
+                    registros_precios = df_precios_subida.to_dict(orient="records")
+                    tamano_bloque_precios = 500
+                    total_precios = len(registros_precios)
+                    barra_precios = st.progress(0, text=f"Sincronizando 0 de {total_precios} precios...")
+
+                    for inicio in range(0, total_precios, tamano_bloque_precios):
+                        bloque_precios = registros_precios[inicio:inicio + tamano_bloque_precios]
+                        supabase.table("lista_precios").upsert(
+                            bloque_precios,
+                            on_conflict="referencia",
+                        ).execute()
+                        procesados = min(inicio + tamano_bloque_precios, total_precios)
+                        barra_precios.progress(
+                            procesados / total_precios,
+                            text=f"Sincronizando {procesados} de {total_precios} precios...",
+                        )
+
+                    st.success(f"✅ Lista de precios actualizada: {total_precios} registros sincronizados.")
+            except Exception as ex:
+                st.error(f"⚠️ No se pudo procesar la lista de precios: {ex}")
+
+# ------------------------------------------
+# 8. PESTAÑA: PROMOCIONES (SÓLO ADMIN)
+# ------------------------------------------
+if tab_promociones is not None:
+    with tab_promociones:
+        st.subheader("🏷️ Crear Nueva Promoción")
+        st.info(
+            "Define la campaña y carga un Excel con una columna Modelo, SKU o Referencia. "
+            "Puedes aplicar un descuento general o leer descuentos individuales desde el archivo."
+        )
+
+        col_prom_nombre, col_prom_activa = st.columns([3, 1])
+        nombre_promocion = col_prom_nombre.text_input(
+            "Nombre de la promoción",
+            placeholder="Ejemplo: ADIFEST",
+            key="promotion_name",
+        )
+        promocion_activa = col_prom_activa.checkbox(
+            "Promoción activa",
+            value=True,
+            key="promotion_active",
+        )
+        descripcion_promocion = st.text_area(
+            "Descripción opcional",
+            key="promotion_description",
+        )
+        col_fecha_inicio, col_fecha_fin = st.columns(2)
+        fecha_inicio_promocion = col_fecha_inicio.date_input(
+            "Fecha de inicio",
+            value=datetime.now().date(),
+            key="promotion_start_date",
+        )
+        fecha_fin_promocion = col_fecha_fin.date_input(
+            "Fecha de término",
+            value=datetime.now().date(),
+            key="promotion_end_date",
+        )
+        modo_descuento = st.radio(
+            "Forma de aplicar el descuento",
+            ["Descuento general", "Descuentos individuales desde Excel"],
+            horizontal=True,
+            key="promotion_discount_mode",
+        )
+        descuento_general = None
+        if modo_descuento == "Descuento general":
+            descuento_general = st.number_input(
+                "Descuento general (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=40.0,
+                step=1.0,
+                key="promotion_general_discount",
+            )
+        else:
+            st.caption(
+                "El Excel debe incluir una columna Descuento, % Descuento o Porcentaje."
+            )
+
+        archivo_promocion = st.file_uploader(
+            "Subir productos de la promoción (.xlsx)",
+            type=["xlsx"],
+            key="promotion_products_excel",
+        )
+
+        if archivo_promocion is not None:
+            try:
+                df_productos_promocion, validacion_promocion = preparar_productos_promocion_excel(
+                    io.BytesIO(archivo_promocion.getvalue()),
+                    descuento_general=descuento_general,
+                )
+                st.caption(
+                    f"Encabezado detectado en la fila {validacion_promocion['fila_encabezado']}."
+                )
+                col_vp1, col_vp2, col_vp3, col_vp4 = st.columns(4)
+                col_vp1.metric("Filas leídas", validacion_promocion["filas_leidas"])
+                col_vp2.metric("Modelos válidos", validacion_promocion["modelos_validos"])
+                col_vp3.metric("Duplicados", validacion_promocion["duplicados_descartados"])
+                col_vp4.metric(
+                    "Filas inválidas",
+                    validacion_promocion["modelos_vacios"]
+                    + validacion_promocion["descuentos_invalidos"],
+                )
+                st.markdown("**Vista previa de la promoción**")
+                st.dataframe(
+                    df_productos_promocion.head(100),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if len(df_productos_promocion) > 100:
+                    st.caption(
+                        f"Se muestran 100 de {len(df_productos_promocion)} modelos válidos."
+                    )
+
+                confirmar_promocion = st.checkbox(
+                    "Confirmo que revisé los datos y deseo crear esta promoción en Supabase.",
+                    key="confirm_promotion_upload",
+                )
+                if st.button(
+                    "🏷️ Crear Promoción",
+                    disabled=not confirmar_promocion or df_productos_promocion.empty,
+                    key="create_promotion",
+                ):
+                    nombre_limpio = nombre_promocion.strip()
+                    if not nombre_limpio:
+                        st.error("Escribe un nombre para la promoción.")
+                    elif fecha_fin_promocion < fecha_inicio_promocion:
+                        st.error("La fecha de término no puede ser anterior a la fecha de inicio.")
+                    else:
+                        promocion_creada_id = None
+                        try:
+                            respuesta_promocion = supabase.table("promociones").insert({
+                                "nombre": nombre_limpio,
+                                "descripcion": descripcion_promocion.strip() or None,
+                                "fecha_inicio": fecha_inicio_promocion.isoformat(),
+                                "fecha_fin": fecha_fin_promocion.isoformat(),
+                                "activa": promocion_activa,
+                            }).execute()
+                            if not respuesta_promocion.data:
+                                raise ValueError("Supabase no devolvió el identificador de la promoción.")
+                            promocion_creada_id = respuesta_promocion.data[0]["id"]
+                            registros_promocion = (
+                                df_productos_promocion[["sku_maestro", "descuento_porcentaje"]]
+                                .assign(promocion_id=promocion_creada_id)
+                                .astype(object)
+                                .where(pd.notna, None)
+                                .to_dict(orient="records")
+                            )
+                            total_productos_promocion = len(registros_promocion)
+                            tamano_bloque_promocion = 500
+                            barra_promocion = st.progress(
+                                0,
+                                text=f"Guardando 0 de {total_productos_promocion} modelos...",
+                            )
+                            for inicio in range(0, total_productos_promocion, tamano_bloque_promocion):
+                                bloque_promocion = registros_promocion[
+                                    inicio:inicio + tamano_bloque_promocion
+                                ]
+                                supabase.table("promocion_productos").upsert(
+                                    bloque_promocion,
+                                    on_conflict="promocion_id,sku_maestro",
+                                ).execute()
+                                guardados = min(
+                                    inicio + tamano_bloque_promocion,
+                                    total_productos_promocion,
+                                )
+                                barra_promocion.progress(
+                                    guardados / total_productos_promocion,
+                                    text=(
+                                        f"Guardando {guardados} de "
+                                        f"{total_productos_promocion} modelos..."
+                                    ),
+                                )
+                            barra_promocion.empty()
+                            st.success(
+                                f"✅ Promoción '{nombre_limpio}' creada con "
+                                f"{total_productos_promocion} modelos."
+                            )
+                        except Exception:
+                            if promocion_creada_id:
+                                try:
+                                    supabase.table("promociones").delete().eq(
+                                        "id", promocion_creada_id
+                                    ).execute()
+                                except Exception:
+                                    pass
+                            raise
+            except Exception as ex:
+                st.error(f"⚠️ No se pudo preparar o crear la promoción: {ex}")
+
         st.markdown("---")
+        st.subheader("📋 Administrar Promociones")
+        st.caption(
+            "Consulta el historial, ajusta las fechas o cambia el estado sin borrar campañas ni productos."
+        )
+        try:
+            promociones_registradas, conteos_promociones = obtener_promociones_con_conteos()
+            if not promociones_registradas:
+                st.info("Todavía no hay promociones registradas.")
+            else:
+                for promocion in promociones_registradas:
+                    promocion_id = str(promocion["id"])
+                    estado_promocion, icono_estado = clasificar_estado_promocion(promocion)
+                    cantidad_modelos = conteos_promociones.get(promocion_id, 0)
+                    titulo_promocion = (
+                        f"{icono_estado} {promocion['nombre']} · {estado_promocion} · "
+                        f"{cantidad_modelos:,} modelos"
+                    )
+                    with st.expander(titulo_promocion, expanded=False):
+                        if promocion.get("descripcion"):
+                            st.write(promocion["descripcion"])
+                        col_estado, col_modelos = st.columns(2)
+                        col_estado.metric("Estado", estado_promocion)
+                        col_modelos.metric("Modelos", cantidad_modelos)
+
+                        fecha_inicio_actual = pd.to_datetime(
+                            promocion.get("fecha_inicio"), errors="coerce"
+                        )
+                        fecha_fin_actual = pd.to_datetime(
+                            promocion.get("fecha_fin"), errors="coerce"
+                        )
+                        valor_inicio = (
+                            fecha_inicio_actual.date()
+                            if pd.notna(fecha_inicio_actual)
+                            else datetime.now().date()
+                        )
+                        valor_fin = (
+                            fecha_fin_actual.date()
+                            if pd.notna(fecha_fin_actual)
+                            else valor_inicio
+                        )
+                        col_editar_inicio, col_editar_fin = st.columns(2)
+                        nueva_fecha_inicio = col_editar_inicio.date_input(
+                            "Inicio",
+                            value=valor_inicio,
+                            key=f"admin_promotion_start_{promocion_id}",
+                        )
+                        nueva_fecha_fin = col_editar_fin.date_input(
+                            "Término",
+                            value=valor_fin,
+                            key=f"admin_promotion_end_{promocion_id}",
+                        )
+                        if st.button(
+                            "Guardar nuevas fechas",
+                            key=f"save_promotion_dates_{promocion_id}",
+                        ):
+                            if nueva_fecha_fin < nueva_fecha_inicio:
+                                st.error("La fecha de término no puede ser anterior al inicio.")
+                            else:
+                                supabase.table("promociones").update({
+                                    "fecha_inicio": nueva_fecha_inicio.isoformat(),
+                                    "fecha_fin": nueva_fecha_fin.isoformat(),
+                                }).eq("id", promocion_id).execute()
+                                st.success("Fechas actualizadas correctamente.")
+                                st.rerun()
+
+                        promocion_esta_activa = bool(promocion.get("activa", False))
+                        accion = "desactivar" if promocion_esta_activa else "reactivar"
+                        confirmar_cambio = st.checkbox(
+                            f"Confirmo que deseo {accion} esta promoción.",
+                            key=f"confirm_promotion_status_{promocion_id}",
+                        )
+                        etiqueta_boton = (
+                            "⛔ Desactivar ahora"
+                            if promocion_esta_activa
+                            else "✅ Reactivar promoción"
+                        )
+                        if st.button(
+                            etiqueta_boton,
+                            disabled=not confirmar_cambio,
+                            key=f"change_promotion_status_{promocion_id}",
+                        ):
+                            supabase.table("promociones").update({
+                                "activa": not promocion_esta_activa,
+                            }).eq("id", promocion_id).execute()
+                            st.success(
+                                "Promoción desactivada inmediatamente."
+                                if promocion_esta_activa
+                                else "Promoción reactivada correctamente."
+                            )
+                            st.rerun()
+
+                        mostrar_productos = st.checkbox(
+                            "Ver productos y preparar reporte",
+                            key=f"show_promotion_products_{promocion_id}",
+                        )
+                        if mostrar_productos:
+                            try:
+                                detalle_promocion = obtener_productos_de_promocion(
+                                    promocion_id
+                                )
+                                if detalle_promocion.empty:
+                                    st.info("Esta promoción no tiene productos registrados.")
+                                else:
+                                    texto_busqueda = st.text_input(
+                                        "Buscar un SKU dentro de esta promoción",
+                                        key=f"search_promotion_sku_{promocion_id}",
+                                        placeholder="Ejemplo: BB5497",
+                                    ).strip()
+                                    detalle_visible = detalle_promocion.copy()
+                                    if texto_busqueda:
+                                        detalle_visible = detalle_visible[
+                                            detalle_visible["sku_maestro"]
+                                            .fillna("")
+                                            .astype(str)
+                                            .str.contains(
+                                                texto_busqueda,
+                                                case=False,
+                                                regex=False,
+                                            )
+                                        ]
+
+                                    st.caption(
+                                        f"Se encontraron {len(detalle_visible):,} de "
+                                        f"{len(detalle_promocion):,} productos. "
+                                        "La vista muestra como máximo 300 filas."
+                                    )
+                                    st.dataframe(
+                                        detalle_visible.head(300).rename(columns={
+                                            "sku_maestro": "SKU maestro",
+                                            "descuento_porcentaje": "Descuento (%)",
+                                            "created_at": "Fecha de registro",
+                                        }),
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+
+                                    nombre_reporte = re.sub(
+                                        r"[^A-Za-z0-9_-]+",
+                                        "_",
+                                        str(promocion.get("nombre") or "promocion").strip(),
+                                    ).strip("_") or "promocion"
+                                    archivo_reporte = crear_reporte_promocion_excel(
+                                        promocion,
+                                        detalle_promocion,
+                                        estado_promocion,
+                                    )
+                                    st.download_button(
+                                        "⬇️ Descargar historial en Excel",
+                                        data=archivo_reporte,
+                                        file_name=(
+                                            f"historial_promocion_{nombre_reporte}.xlsx"
+                                        ),
+                                        mime=(
+                                            "application/vnd.openxmlformats-officedocument."
+                                            "spreadsheetml.sheet"
+                                        ),
+                                        key=f"download_promotion_{promocion_id}",
+                                    )
+                            except Exception as ex:
+                                st.error(
+                                    "⚠️ No se pudo consultar el detalle de esta "
+                                    f"promoción: {ex}"
+                                )
+        except Exception as ex:
+            st.error(f"⚠️ No se pudo consultar o actualizar el historial de promociones: {ex}")
+
+# ------------------------------------------
+# 9. PESTAÑA: METAS POR ASESOR (SÓLO ADMIN)
+# ------------------------------------------
+if tab_metas is not None:
+    with tab_metas:
         st.subheader("⚙️ Configuración de Metas por Asesor")
         
         res_u = supabase.table("usuarios").select("*").execute().data
@@ -1346,7 +2769,7 @@ if tab_admin_erp is not None:
                 st.rerun()
 
 # ------------------------------------------
-# 7. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
+# 10. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
 # ------------------------------------------
 if tab_admin_user is not None:
     with tab_admin_user:
