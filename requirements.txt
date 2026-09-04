@@ -1,9 +1,11 @@
-streamlit
+streamlit==1.62.0
 pandas
 openpyxl
 supabase
 streamlit-option-menu
 python-dotenv
 google-generativeai
+google-api-python-client
+google-auth
 altair
 Pillow
