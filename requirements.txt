@@ -5,5 +5,7 @@ supabase
 streamlit-option-menu
 python-dotenv
 google-generativeai
+google-api-python-client
+google-auth
 altair
 Pillow

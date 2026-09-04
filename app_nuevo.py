@@ -3,6 +3,7 @@ import io
 import base64
 import hashlib
 import html
+import json
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -11,10 +12,178 @@ import streamlit as st
 import altair as alt
 from supabase import create_client
 import google.generativeai as genai
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 from PIL import Image, ImageOps
 
 # Importamos las reglas maestras desde nuestro archivo de configuración
 from configuracion_ia import generar_prompt_maestro
+
+
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+
+
+class ArchivoExcelDrive(io.BytesIO):
+    """Archivo en memoria compatible con pandas y los cargadores existentes."""
+
+    def __init__(self, contenido, nombre):
+        super().__init__(contenido)
+        self.name = nombre
+
+
+def _configuracion_google_drive():
+    """Lee la configuración privada de Drive desde los secretos de Streamlit."""
+    configuracion = st.secrets.get("google_drive", {})
+    folder_id = str(configuracion.get("root_folder_id", "")).strip()
+    credencial_base64 = str(
+        configuracion.get("service_account_json_base64", "")
+    ).strip()
+    if not folder_id or not credencial_base64:
+        raise ValueError(
+            "Falta configurar Google Drive en los secretos de Streamlit."
+        )
+
+    try:
+        informacion = json.loads(
+            base64.b64decode(credencial_base64).decode("utf-8")
+        )
+    except Exception as ex:
+        raise ValueError("La credencial privada de Google Drive no es válida.") from ex
+    return folder_id, informacion
+
+
+@st.cache_resource(show_spinner=False)
+def obtener_servicio_google_drive():
+    """Crea el cliente de solo lectura para Google Drive."""
+    _, informacion = _configuracion_google_drive()
+    credenciales = service_account.Credentials.from_service_account_info(
+        informacion,
+        scopes=[GOOGLE_DRIVE_SCOPE],
+    )
+    return build("drive", "v3", credentials=credenciales, cache_discovery=False)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def listar_archivos_excel_drive():
+    """Recorre la carpeta principal y devuelve los Excel de sus subcarpetas."""
+    folder_id, _ = _configuracion_google_drive()
+    servicio = obtener_servicio_google_drive()
+    pendientes = [(folder_id, "SINAPSIS ERP")]
+    archivos = []
+
+    while pendientes:
+        carpeta_actual, ruta_actual = pendientes.pop(0)
+        token = None
+        while True:
+            respuesta = servicio.files().list(
+                q=f"'{carpeta_actual}' in parents and trashed = false",
+                fields=(
+                    "nextPageToken, files(id,name,mimeType,modifiedTime,size)"
+                ),
+                pageToken=token,
+                pageSize=1000,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            for elemento in respuesta.get("files", []):
+                if elemento.get("mimeType") == "application/vnd.google-apps.folder":
+                    pendientes.append(
+                        (elemento["id"], f"{ruta_actual}/{elemento['name']}")
+                    )
+                elif str(elemento.get("name", "")).lower().endswith(".xlsx"):
+                    archivos.append({
+                        **elemento,
+                        "ruta": ruta_actual,
+                    })
+            token = respuesta.get("nextPageToken")
+            if not token:
+                break
+
+    return sorted(
+        archivos,
+        key=lambda item: item.get("modifiedTime", ""),
+        reverse=True,
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def descargar_archivo_excel_drive(file_id, nombre, modified_time):
+    """Descarga un Excel privado a memoria sin guardarlo en el servidor."""
+    servicio = obtener_servicio_google_drive()
+    solicitud = servicio.files().get_media(fileId=file_id)
+    salida = io.BytesIO()
+    descargador = MediaIoBaseDownload(salida, solicitud)
+    terminado = False
+    while not terminado:
+        _, terminado = descargador.next_chunk()
+    return salida.getvalue()
+
+
+def seleccionar_excel_dispositivo_o_drive(
+    etiqueta,
+    key,
+    carpeta_drive=None,
+    tipos_locales=None,
+):
+    """Muestra un selector uniforme para dispositivo o Google Drive."""
+    tipos_locales = tipos_locales or ["xlsx"]
+    origen = st.radio(
+        "Origen del archivo",
+        options=["Mi dispositivo", "Google Drive"],
+        horizontal=True,
+        key=f"{key}_origen",
+    )
+    if origen == "Mi dispositivo":
+        return st.file_uploader(etiqueta, type=tipos_locales, key=key)
+
+    try:
+        archivos = listar_archivos_excel_drive()
+    except Exception as ex:
+        st.warning(f"Google Drive todavía no está disponible: {ex}")
+        return None
+
+    if carpeta_drive:
+        carpeta_objetivo = carpeta_drive.strip().upper()
+        archivos = [
+            archivo
+            for archivo in archivos
+            if carpeta_objetivo
+            in [parte.strip().upper() for parte in archivo["ruta"].split("/")]
+        ]
+    if not archivos:
+        st.info(
+            "No se encontraron archivos .xlsx"
+            + (f" en la carpeta {carpeta_drive}." if carpeta_drive else ".")
+        )
+        return None
+
+    opciones = {}
+    for archivo in archivos:
+        fecha = str(archivo.get("modifiedTime", ""))[:10] or "Sin fecha"
+        tamano = int(archivo.get("size", 0) or 0) / (1024 * 1024)
+        etiqueta_archivo = (
+            f"{archivo['name']} · {fecha} · {tamano:.1f} MB · {archivo['ruta']}"
+        )
+        opciones[etiqueta_archivo] = archivo
+
+    seleccion = st.selectbox(
+        etiqueta,
+        options=list(opciones.keys()),
+        key=f"{key}_drive",
+    )
+    archivo = opciones[seleccion]
+    try:
+        contenido = descargar_archivo_excel_drive(
+            archivo["id"],
+            archivo["name"],
+            archivo.get("modifiedTime", ""),
+        )
+        st.caption(f"Archivo seleccionado desde Drive: {archivo['ruta']}/{archivo['name']}")
+        return ArchivoExcelDrive(contenido, archivo["name"])
+    except Exception as ex:
+        st.error(f"No se pudo descargar el archivo seleccionado: {ex}")
+        return None
 
 
 def _normalizar_encabezado(valor):
@@ -974,7 +1143,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.27.1 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.28 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -1004,7 +1173,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.27.1 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.28 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -1642,10 +1811,11 @@ if pagina_actual == "📐 Rendimiento m²":
         )
 
         M2_TIENDA_TOTAL = 268.61
-        archivo_ventas_ref = st.file_uploader(
-            "📥 Subir: Extracto Referencia - Documento (Costo) [Excel]",
-            type=["xlsx", "xls"],
-            key="ventas_ref_m2"
+        archivo_ventas_ref = seleccionar_excel_dispositivo_o_drive(
+            "📥 Seleccionar: Extracto Referencia - Documento (Costo) [Excel]",
+            key="ventas_ref_m2",
+            carpeta_drive="VENTAS TIENDA",
+            tipos_locales=["xlsx", "xls"],
         )
 
         if archivo_ventas_ref is not None:
@@ -2109,7 +2279,12 @@ if pagina_actual == "📦 Scanner Rápido":
 if pagina_actual == "📥 Cargas ERP e inventario":
     if st.session_state.es_admin:
         st.subheader("📥 Cargar Reporte de Ventas Diario del ERP (Excel)")
-        archivo_sales = st.file_uploader("Subir Archivo Excel de Ventas", type=["xlsx", "xls"], key="sales_excel")
+        archivo_sales = seleccionar_excel_dispositivo_o_drive(
+            "Seleccionar Archivo Excel de Ventas",
+            key="sales_excel",
+            carpeta_drive="VENTAS ASESORES",
+            tipos_locales=["xlsx", "xls"],
+        )
         
         if archivo_sales is not None:
             try:
@@ -2150,7 +2325,12 @@ if pagina_actual == "📥 Cargas ERP e inventario":
         st.subheader("📦 Cargar Catálogo de Inventario al Núcleo")
         st.info("Sube aquí el archivo de tu ERP (RPInv_Extracto_Referencia) en formato Excel para sincronizar la red en Supabase.")
 
-        archivo_catalogo = st.file_uploader("Subir Catálogo (.xlsx)", type=["xlsx"], key="cat_csv")
+        archivo_catalogo = seleccionar_excel_dispositivo_o_drive(
+            "Seleccionar Catálogo (.xlsx)",
+            key="cat_csv",
+            carpeta_drive="INVENTARIO",
+            tipos_locales=["xlsx"],
+        )
 
         if archivo_catalogo is not None:
             if st.button("⚡ Sincronizar Catálogo en la Nube"):
@@ -2251,10 +2431,11 @@ if pagina_actual == "💲 Lista de precios":
             "Carga la lista de precios en formato Excel (.xlsx). Se utilizarán automáticamente "
             "las referencias con existencia del catálogo sincronizado arriba durante esta sesión."
         )
-        archivo_precios = st.file_uploader(
-            "Subir Lista de Precios (.xlsx)",
-            type=["xlsx"],
+        archivo_precios = seleccionar_excel_dispositivo_o_drive(
+            "Seleccionar Lista de Precios (.xlsx)",
             key="price_list_excel",
+            carpeta_drive="PRECIOS",
+            tipos_locales=["xlsx"],
         )
         inventario_actual_precios = st.session_state.get("inventario_actual_precios")
         if inventario_actual_precios:
