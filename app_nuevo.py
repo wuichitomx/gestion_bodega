@@ -19,6 +19,7 @@ from PIL import Image, ImageOps
 
 # Importamos las reglas maestras desde nuestro archivo de configuración
 from configuracion_ia import generar_prompt_maestro
+from arqueo_caja import mostrar_arqueo_caja
 
 
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
@@ -1505,11 +1506,18 @@ with st.sidebar:
             key=f"pagina_menu_{seccion_menu}",
         )
     else:
+        rol_actual = str(st.session_state.usuario_info.get("rol", "")).strip().lower()
+        opciones_usuario = ["📊 Dashboard", "🔍 Búsqueda Manual"]
+        if rol_actual == "cajero":
+            opciones_usuario.insert(0, "💵 Arqueo de caja")
         pagina_actual = st.radio(
             "Pantalla",
-            options=["📊 Dashboard", "🔍 Búsqueda Manual"],
-            key="pagina_menu_asesor",
+            options=opciones_usuario,
+            key="pagina_menu_usuario",
         )
+
+if pagina_actual == "💵 Arqueo de caja":
+    mostrar_arqueo_caja()
 
 # ------------------------------------------
 # 1. PESTAÑA: PERFORMANCE & KPIS (DASHBOARD)
@@ -2921,18 +2929,23 @@ if pagina_actual == "👥 Gestión Usuarios":
     if st.session_state.es_admin:
         st.subheader("👥 Agregar Usuario")
         with st.form("nuevo_u"):
-            col_u1, col_u2 = st.columns(2)
+            col_u1, col_u2, col_u3 = st.columns(3)
             with col_u1:
                 u_n = st.text_input("Usuario")
             with col_u2:
                 p_n = st.text_input("Contraseña")
+            with col_u3:
+                rol_n = st.selectbox(
+                    "Perfil",
+                    options=["asesor", "cajero", "admin"],
+                )
             if st.form_submit_button("Agregar Usuario"):
                 if u_n and p_n:
                     try:
                         supabase.table("usuarios").insert({
                             "username": u_n.strip(), 
                             "password": p_n.strip(), 
-                            "rol": "asesor",
+                            "rol": rol_n,
                             "codigo_erp": u_n.strip(),
                             "nombre_completo": "",
                             "meta_mensual": 0.0
@@ -2980,7 +2993,7 @@ if pagina_actual == "👥 Gestión Usuarios":
                 column_config={
                     "username": st.column_config.TextColumn("Usuario App", disabled=True),
                     "password": st.column_config.TextColumn("Contraseña (Editable)"),
-                    "rol": st.column_config.SelectboxColumn("Rol de Acceso", options=["admin", "asesor"])
+                    "rol": st.column_config.SelectboxColumn("Rol de Acceso", options=["admin", "asesor", "cajero"])
                 },
                 use_container_width=True
             )
