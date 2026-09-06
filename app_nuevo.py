@@ -1,6 +1,9 @@
 import os
 import io
 import base64
+import re
+import unicodedata
+from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -10,6 +13,117 @@ from PIL import Image, ImageOps
 
 # Importamos las reglas maestras desde nuestro archivo de configuración
 from configuracion_ia import generar_prompt_maestro
+
+
+def _normalizar_encabezado(valor):
+    """Normaliza encabezados del ERP para poder reconocer variantes comunes."""
+    texto = unicodedata.normalize("NFKD", str(valor or ""))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", " ", texto.lower()).strip()
+
+
+def _normalizar_precio(valor):
+    """Convierte importes numéricos o con formato regional a float."""
+    if pd.isna(valor):
+        return None
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        return float(valor)
+
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    negativo = texto.startswith("(") and texto.endswith(")")
+    texto = re.sub(r"[^0-9,.-]", "", texto)
+    if texto.count("-") > 1:
+        return None
+    texto = texto.replace("-", "")
+    if not texto:
+        return None
+
+    if "," in texto and "." in texto:
+        decimal = "," if texto.rfind(",") > texto.rfind(".") else "."
+        miles = "." if decimal == "," else ","
+        texto = texto.replace(miles, "").replace(decimal, ".")
+    elif "," in texto:
+        partes = texto.split(",")
+        texto = "".join(partes) if len(partes[-1]) == 3 else "".join(partes[:-1]) + "." + partes[-1]
+    elif texto.count(".") > 1:
+        partes = texto.split(".")
+        texto = "".join(partes) if len(partes[-1]) == 3 else "".join(partes[:-1]) + "." + partes[-1]
+
+    try:
+        numero = float(texto)
+        return -numero if negativo else numero
+    except ValueError:
+        return None
+
+
+def _separar_referencia(referencia):
+    """Obtiene SKU maestro y talla desde el último sufijo de la referencia."""
+    referencia = str(referencia).strip().upper()
+    if "-" not in referencia:
+        return referencia, ""
+    sku_maestro, talla = referencia.rsplit("-", 1)
+    return sku_maestro.strip(), talla.strip()
+
+
+def preparar_lista_precios_excel(archivo):
+    """Detecta el encabezado real y prepara la lista de precios para validación."""
+    bruto = pd.read_excel(archivo, header=None, dtype=object)
+    aliases = {
+        "referencia": {"referencia", "ref", "codigo referencia", "referencia articulo", "referencia producto"},
+        "descripcion": {"descripcion", "descripcion articulo", "descripcion producto", "nombre articulo", "producto"},
+        "precio": {
+            "lista publico", "lista de publico", "precio publico", "precio de publico",
+            "precio lista", "precio de lista", "pvp", "precio venta", "precio venta publico"
+        },
+    }
+
+    fila_encabezado = None
+    indices = None
+    for numero_fila, fila in bruto.head(60).iterrows():
+        normalizados = [_normalizar_encabezado(valor) for valor in fila.tolist()]
+        encontrados = {}
+        for destino, opciones in aliases.items():
+            for indice, encabezado in enumerate(normalizados):
+                if encabezado in opciones:
+                    encontrados[destino] = indice
+                    break
+        if len(encontrados) == len(aliases):
+            fila_encabezado, indices = numero_fila, encontrados
+            break
+
+    if fila_encabezado is None:
+        raise ValueError(
+            "No se encontró una fila con Referencia, Descripción y Lista Público (o encabezados equivalentes) "
+            "en las primeras 60 filas."
+        )
+
+    datos = bruto.iloc[fila_encabezado + 1:, [indices["referencia"], indices["descripcion"], indices["precio"]]].copy()
+    datos.columns = ["referencia", "descripcion", "precio_original"]
+    datos["referencia"] = datos["referencia"].where(datos["referencia"].notna(), "").astype(str).str.strip().str.upper()
+    datos["descripcion"] = datos["descripcion"].where(datos["descripcion"].notna(), "").astype(str).str.strip()
+    datos["precio_lista"] = datos["precio_original"].apply(_normalizar_precio)
+    datos[["sku_maestro", "talla"]] = datos["referencia"].apply(
+        lambda valor: pd.Series(_separar_referencia(valor))
+    )
+
+    vacias = datos["referencia"].eq("")
+    precios_invalidos = datos["precio_lista"].isna() | (datos["precio_lista"] < 0)
+    duplicadas = datos["referencia"].ne("") & datos["referencia"].duplicated(keep="last")
+    validas = datos.loc[~vacias & ~precios_invalidos & ~duplicadas].copy()
+    validas["precio_lista"] = validas["precio_lista"].round(2)
+    validas = validas[["referencia", "descripcion", "talla", "sku_maestro", "precio_lista"]]
+
+    conteos = {
+        "filas_leidas": len(datos),
+        "referencias_vacias": int(vacias.sum()),
+        "precios_invalidos": int((precios_invalidos & ~vacias).sum()),
+        "duplicados_descartados": int(duplicadas.sum()),
+        "registros_validos": len(validas),
+        "fila_encabezado": int(fila_encabezado) + 1,
+    }
+    return validas, conteos
 
 st.set_page_config(page_title="Sinapsis", page_icon="⚡", layout="wide")
 
@@ -588,6 +702,71 @@ if tab_admin_erp is not None:
                         st.success(f"⚡ ¡Núcleo actualizado exitosamente! Se sincronizaron {total_registros} artículos.")
                 except Exception as ex:
                     st.error(f"⚠️ Error al sincronizar: {ex}")
+
+        st.markdown("---")
+        st.subheader("💲 Actualizar Lista de Precios ERP")
+        st.info(
+            "Carga un Excel de precios. La red localizará el encabezado real y preparará "
+            "Referencia, Descripción, talla, SKU maestro y precio antes de sincronizar."
+        )
+        archivo_precios = st.file_uploader(
+            "Subir Lista de Precios (Excel)",
+            type=["xlsx", "xls"],
+            key="price_list_excel",
+        )
+
+        if archivo_precios is not None:
+            try:
+                df_precios, validacion_precios = preparar_lista_precios_excel(archivo_precios)
+                st.caption(
+                    f"Encabezado detectado en la fila {validacion_precios['fila_encabezado']} del archivo."
+                )
+                col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+                col_p1.metric("Filas leídas", validacion_precios["filas_leidas"])
+                col_p2.metric("Registros válidos", validacion_precios["registros_validos"])
+                col_p3.metric(
+                    "Sin referencia/precio",
+                    validacion_precios["referencias_vacias"] + validacion_precios["precios_invalidos"],
+                )
+                col_p4.metric("Duplicados descartados", validacion_precios["duplicados_descartados"])
+
+                st.markdown("**Vista previa de los registros válidos**")
+                st.dataframe(df_precios.head(100), use_container_width=True, hide_index=True)
+                if len(df_precios) > 100:
+                    st.caption(f"Se muestran 100 de {len(df_precios)} registros válidos.")
+
+                confirmar_precios = st.checkbox(
+                    "Confirmo que revisé la vista previa y deseo actualizar `lista_precios`.",
+                    key="confirm_price_upload",
+                )
+                if st.button(
+                    "⚡ Sincronizar Lista de Precios",
+                    disabled=not confirmar_precios or df_precios.empty,
+                    key="sync_price_list",
+                ):
+                    fecha_actualizacion = datetime.now(timezone.utc).isoformat()
+                    df_precios_subida = df_precios.assign(fecha_actualizacion=fecha_actualizacion)
+                    df_precios_subida = df_precios_subida.astype(object).where(pd.notna(df_precios_subida), None)
+                    registros_precios = df_precios_subida.to_dict(orient="records")
+                    tamano_bloque_precios = 500
+                    total_precios = len(registros_precios)
+                    barra_precios = st.progress(0, text=f"Sincronizando 0 de {total_precios} precios...")
+
+                    for inicio in range(0, total_precios, tamano_bloque_precios):
+                        bloque_precios = registros_precios[inicio:inicio + tamano_bloque_precios]
+                        supabase.table("lista_precios").upsert(
+                            bloque_precios,
+                            on_conflict="referencia",
+                        ).execute()
+                        procesados = min(inicio + tamano_bloque_precios, total_precios)
+                        barra_precios.progress(
+                            procesados / total_precios,
+                            text=f"Sincronizando {procesados} de {total_precios} precios...",
+                        )
+
+                    st.success(f"✅ Lista de precios actualizada: {total_precios} registros sincronizados.")
+            except Exception as ex:
+                st.error(f"⚠️ No se pudo procesar la lista de precios: {ex}")
         
         st.markdown("---")
         st.subheader("⚙️ Configuración de Metas por Asesor")
