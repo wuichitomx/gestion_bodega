@@ -2,11 +2,15 @@ import io
 import os
 import re
 import zipfile
+import copy
+from uuid import uuid4
 from datetime import date, datetime
 from xml.etree import ElementTree as ET
+from xml.dom import minidom
 
 import pandas as pd
 import streamlit as st
+from cajas_persistencia import ErrorPersistenciaCaja, huella_movimientos
 
 
 MEDIOS_CAPTURA = [
@@ -196,6 +200,24 @@ ET.register_namespace("", NS_MAIN)
 ET.register_namespace("r", NS_REL_DOC)
 
 
+def _hijos_xml(nodo, nombre):
+    return [hijo for hijo in nodo.childNodes
+            if hijo.nodeType == hijo.ELEMENT_NODE
+            and hijo.namespaceURI == NS_MAIN and hijo.localName == nombre]
+
+
+def _nuevo_xml(documento, padre, nombre):
+    prefijo = padre.prefix
+    return documento.createElementNS(NS_MAIN, f"{prefijo}:{nombre}" if prefijo else nombre)
+
+
+def _columna_xml(referencia):
+    numero = 0
+    for letra in re.match(r"[A-Z]+", referencia).group():
+        numero = numero * 26 + ord(letra) - ord("A") + 1
+    return numero
+
+
 def _editar_ooxml(ruta, cambios_por_hoja):
     """Cambia celdas puntuales sin reconstruir el libro ni sus macros."""
     with zipfile.ZipFile(ruta, "r") as origen:
@@ -219,45 +241,72 @@ def _editar_ooxml(ruta, cambios_por_hoja):
         if nombre_hoja not in rutas_hojas:
             raise ValueError(f"La plantilla no contiene la pestaña {nombre_hoja}.")
         ruta_xml = rutas_hojas[nombre_hoja]
-        raiz = ET.fromstring(archivos[ruta_xml])
-        datos = raiz.find(f"{{{NS_MAIN}}}sheetData")
+        # Preserve prefix declarations, including those referenced only by
+        # mc:Ignorable or other QName-valued attributes. ElementTree drops them.
+        documento = minidom.parseString(archivos[ruta_xml])
+        datos = _hijos_xml(documento.documentElement, "sheetData")[0]
         celdas = {
-            celda.attrib.get("r"): celda
-            for fila in datos.findall(f"{{{NS_MAIN}}}row")
-            for celda in fila.findall(f"{{{NS_MAIN}}}c")
+            celda.getAttribute("r"): celda
+            for fila in _hijos_xml(datos, "row")
+            for celda in _hijos_xml(fila, "c")
         }
         for referencia, valor in cambios.items():
             celda = celdas.get(referencia)
             if celda is None:
                 numero_fila = int(re.search(r"\d+", referencia).group())
                 fila = next(
-                    (item for item in datos.findall(f"{{{NS_MAIN}}}row") if int(item.attrib["r"]) == numero_fila),
+                    (item for item in _hijos_xml(datos, "row") if int(item.getAttribute("r")) == numero_fila),
                     None,
                 )
                 if fila is None:
-                    fila = ET.SubElement(datos, f"{{{NS_MAIN}}}row", {"r": str(numero_fila)})
-                celda = ET.SubElement(fila, f"{{{NS_MAIN}}}c", {"r": referencia})
+                    fila = _nuevo_xml(documento, datos, "row")
+                    fila.setAttribute("r", str(numero_fila))
+                    siguiente = next((item for item in _hijos_xml(datos, "row")
+                                      if int(item.getAttribute("r")) > numero_fila), None)
+                    datos.insertBefore(fila, siguiente)
+                celda = _nuevo_xml(documento, fila, "c")
+                celda.setAttribute("r", referencia)
+                siguiente = next((item for item in _hijos_xml(fila, "c")
+                                  if _columna_xml(item.getAttribute("r")) > _columna_xml(referencia)), None)
+                fila.insertBefore(celda, siguiente)
                 celdas[referencia] = celda
-            for hijo in list(celda):
-                if hijo.tag in {f"{{{NS_MAIN}}}f", f"{{{NS_MAIN}}}v", f"{{{NS_MAIN}}}is"}:
-                    celda.remove(hijo)
+            for nombre in ("f", "v", "is"):
+                for hijo in _hijos_xml(celda, nombre):
+                    celda.removeChild(hijo)
             if isinstance(valor, str):
-                celda.set("t", "inlineStr")
-                nodo_is = ET.SubElement(celda, f"{{{NS_MAIN}}}is")
-                nodo_t = ET.SubElement(nodo_is, f"{{{NS_MAIN}}}t")
-                nodo_t.text = valor
+                celda.setAttribute("t", "inlineStr")
+                nodo_is = _nuevo_xml(documento, celda, "is")
+                nodo_t = _nuevo_xml(documento, nodo_is, "t")
+                nodo_t.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:space", "preserve")
+                nodo_t.appendChild(documento.createTextNode(valor))
+                nodo_is.appendChild(nodo_t)
+                celda.insertBefore(nodo_is, celda.firstChild)
             else:
-                celda.attrib.pop("t", None)
-                nodo_v = ET.SubElement(celda, f"{{{NS_MAIN}}}v")
-                nodo_v.text = str(valor)
-        archivos[ruta_xml] = ET.tostring(raiz, encoding="utf-8", xml_declaration=True)
+                if celda.hasAttribute("t"):
+                    celda.removeAttribute("t")
+                nodo_v = _nuevo_xml(documento, celda, "v")
+                nodo_v.appendChild(documento.createTextNode(str(valor)))
+                celda.insertBefore(nodo_v, celda.firstChild)
+        archivos[ruta_xml] = documento.toxml(encoding="utf-8")
+        documento.unlink()
 
-    calculo = libro.find(f"{{{NS_MAIN}}}calcPr")
-    if calculo is None:
-        calculo = ET.SubElement(libro, f"{{{NS_MAIN}}}calcPr")
-    calculo.set("fullCalcOnLoad", "1")
-    calculo.set("forceFullCalc", "1")
-    archivos["xl/workbook.xml"] = ET.tostring(libro, encoding="utf-8", xml_declaration=True)
+    documento_libro = minidom.parseString(archivos["xl/workbook.xml"])
+    raiz_libro = documento_libro.documentElement
+    calculos = _hijos_xml(raiz_libro, "calcPr")
+    if calculos:
+        calculo = calculos[0]
+    else:
+        calculo = _nuevo_xml(documento_libro, raiz_libro, "calcPr")
+        posteriores = {"oleSize", "customWorkbookViews", "pivotCaches", "smartTagPr",
+                       "smartTagTypes", "webPublishing", "fileRecoveryPr",
+                       "webPublishObjects", "extLst"}
+        siguiente = next((n for n in raiz_libro.childNodes
+                          if n.nodeType == n.ELEMENT_NODE and n.localName in posteriores), None)
+        raiz_libro.insertBefore(calculo, siguiente)
+    calculo.setAttribute("fullCalcOnLoad", "1")
+    calculo.setAttribute("forceFullCalc", "1")
+    archivos["xl/workbook.xml"] = documento_libro.toxml(encoding="utf-8")
+    documento_libro.unlink()
 
     salida = io.BytesIO()
     with zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED) as destino:
@@ -324,6 +373,15 @@ def generar_estadillo(fecha_trabajo, corte_x, piezas, tickets):
 
 def _estado_inicial():
     hoy = date.today().isoformat()
+    usuario = st.session_state.get("usuario_actual", "")
+    if "caja_usuario" not in st.session_state:
+        # An existing session from before persistence has no ownership marker.
+        # Keep its data so _cargar_jornada can offer to import it explicitly.
+        st.session_state["caja_usuario"] = usuario
+    elif st.session_state["caja_usuario"] != usuario:
+        st.session_state.pop("arqueo_caja", None)
+        _limpiar_campos_caja()
+        st.session_state["caja_usuario"] = usuario
     if "arqueo_caja" not in st.session_state:
         st.session_state.arqueo_caja = {
             "fecha": hoy,
@@ -331,7 +389,62 @@ def _estado_inicial():
             "cortes": [],
             "ultimo_corte": None,
         }
+    for voucher in st.session_state.arqueo_caja["vouchers"]:
+        voucher.setdefault("id", uuid4().hex)
     return st.session_state.arqueo_caja
+
+
+def _limpiar_campos_caja():
+    for clave in ("arqueo_fecha_trabajo", "texto_corte_z", "texto_corte_x", "cierre_piezas",
+                  "cierre_tickets", "cierre_observaciones", "confirmar_fecha_corte_x",
+                  "importe_voucher", "movimiento_a_eliminar", "caja_cargada"):
+        st.session_state.pop(clave, None)
+
+
+def _guardar_cambio(estado, repositorio, accion, cerrar=False):
+    if repositorio is not None:
+        try:
+            guardado = repositorio.guardar(estado, accion, cerrar=cerrar)
+            if "documentos_cierre" in estado:
+                guardado["documentos_cierre"] = estado["documentos_cierre"]
+            st.session_state.arqueo_caja = guardado
+        except ErrorPersistenciaCaja as error:
+            st.error(str(error))
+            return False
+    else:
+        st.session_state.arqueo_caja = estado
+    return True
+
+
+def _cargar_jornada(estado, repositorio):
+    contexto = (repositorio.usuario, estado["fecha"])
+    if st.session_state.get("caja_cargada") == contexto:
+        return estado
+    try:
+        guardado = repositorio.cargar(estado["fecha"])
+    except ErrorPersistenciaCaja as error:
+        st.error(str(error))
+        st.stop()
+    local_con_datos = bool(estado.get("vouchers") or estado.get("cortes") or estado.get("corte_x"))
+    if local_con_datos and not st.session_state.pop("caja_forzar_recarga", False):
+        if guardado is None:
+            st.warning("Esta sesión contiene datos que todavía no están guardados en Supabase.")
+            if st.button("Guardar la sesión actual en Supabase"):
+                if _guardar_cambio(estado, repositorio, "importar_sesion"):
+                    st.session_state["caja_cargada"] = contexto
+                    st.rerun()
+        else:
+            st.warning("Hay datos en esta sesión y también una jornada guardada. Puedes recuperar la guardada; se conservará una copia temporal de esta sesión mientras la aplicación siga abierta.")
+            if st.button("Recuperar jornada de Supabase"):
+                st.session_state["caja_respaldo_sesion"] = copy.deepcopy(estado)
+                st.session_state.arqueo_caja = guardado
+                st.session_state["caja_cargada"] = contexto
+                st.rerun()
+        st.stop()
+    estado = guardado or {"fecha": estado["fecha"], "vouchers": [], "cortes": [], "ultimo_corte": None, "_version": 0}
+    st.session_state.arqueo_caja = estado
+    st.session_state["caja_cargada"] = contexto
+    return estado
 
 
 def _reiniciar_si_cambia_fecha(estado, fecha_trabajo):
@@ -343,6 +456,10 @@ def _reiniciar_si_cambia_fecha(estado, fecha_trabajo):
             "cortes": [],
             "ultimo_corte": None,
         }
+        for clave in ("caja_cargada", "texto_corte_z", "texto_corte_x", "cierre_piezas",
+                      "cierre_tickets", "cierre_observaciones", "confirmar_fecha_corte_x",
+                      "movimiento_a_eliminar"):
+            st.session_state.pop(clave, None)
         st.rerun()
 
 
@@ -361,7 +478,7 @@ def _totales_para_corte_z(vouchers):
     return totales
 
 
-def mostrar_arqueo_caja():
+def mostrar_arqueo_caja(repositorio=None):
     estado = _estado_inicial()
 
     st.header("Arqueo de caja")
@@ -376,67 +493,147 @@ def mostrar_arqueo_caja():
         key="arqueo_fecha_trabajo",
     )
     _reiniciar_si_cambia_fecha(estado, fecha_trabajo)
+    if repositorio is not None:
+        if st.button("Recargar datos guardados"):
+            st.session_state.pop("caja_cargada", None)
+            st.session_state["caja_forzar_recarga"] = True
+            for clave in ("texto_corte_z", "texto_corte_x", "cierre_piezas", "cierre_tickets", "cierre_observaciones"):
+                st.session_state.pop(clave, None)
+        estado = _cargar_jornada(estado, repositorio)
+        st.caption("Guardado en Supabase por fecha y usuario. Cada cambio se confirma antes de mostrarse como guardado.")
+    else:
+        st.warning("Modo de prueba: los movimientos sólo viven en esta sesión. El guardado permanente todavía no está activado.")
+    estado = copy.deepcopy(estado)
+    cerrada = estado.get("_cerrada", False)
+    if cerrada:
+        st.info("Esta jornada está cerrada. Puedes consultar sus movimientos y descargar los documentos.")
 
     st.subheader("1. Registrar movimiento")
+    if st.session_state.pop("limpiar_importe_voucher", False):
+        st.session_state["importe_voucher"] = None
     with st.form("form_nuevo_voucher", clear_on_submit=True):
         col1, col2, col3 = st.columns([2, 1, 2])
         with col1:
             medio = st.selectbox("Medio de pago", MEDIOS_CAPTURA)
         with col2:
-            importe = st.number_input("Importe", min_value=0.0, step=0.01, format="%.2f")
+            importe = st.number_input(
+                "Importe", min_value=0.0, value=None, step=0.01,
+                format="%.2f", placeholder="Escribe el importe", key="importe_voucher",
+            )
         with col3:
-            folio = st.text_input("Folio o referencia (opcional)")
-        guardar = st.form_submit_button("Agregar movimiento", type="primary")
+            folio = st.text_input(
+                "Folio o referencia (opcional)",
+                help="Puedes repetir una referencia con otro importe o medio de pago. "
+                     "Si usas una tarjeta como referencia, captura sólo sus últimos cuatro dígitos.",
+            )
+        guardar = st.form_submit_button("Agregar movimiento", type="primary", disabled=cerrada)
 
     if guardar:
-        if importe <= 0:
+        if importe is None or importe <= 0:
             st.error("Escribe un importe mayor a cero.")
         elif folio.strip() and any(
             item.get("folio", "").strip().lower() == folio.strip().lower()
+            and item["medio"] == medio
+            and round(abs(float(item["importe"])) * 100) == round(float(importe) * 100)
             for item in estado["vouchers"]
         ):
-            st.error("Ese folio ya fue registrado. Revisa el movimiento antes de continuar.")
+            st.error(
+                "Ya existe un movimiento con la misma referencia, medio de pago e importe. "
+                "Si es otro pago, utiliza su folio o autorización para distinguirlo."
+            )
         else:
             estado["vouchers"].append({
+                "id": uuid4().hex,
                 "hora": datetime.now().strftime("%H:%M"),
                 "medio": medio,
                 "importe": -float(importe) if medio == "NOTA CREDITO" else float(importe),
                 "folio": folio.strip(),
             })
-            st.success("Movimiento agregado al arqueo del día.")
-            st.rerun()
+            estado.pop("documentos_cierre", None)
+            estado.pop("cierre_datos", None)
+            if _guardar_cambio(estado, repositorio, "agregar_movimiento"):
+                st.session_state["limpiar_importe_voucher"] = True
+                st.rerun()
+            st.stop()
 
     if estado["vouchers"]:
+        for voucher in estado["vouchers"]:
+            if "id" not in voucher:
+                voucher["id"] = uuid4().hex
         tabla_vouchers = pd.DataFrame(estado["vouchers"])
+        tabla_vouchers = tabla_vouchers.drop(columns=["id"])
         tabla_vouchers.index = tabla_vouchers.index + 1
+        grupos = {
+            medio: [v["importe"] for v in estado["vouchers"] if v["medio"] == medio]
+            for medio in MEDIOS_CAPTURA
+            if any(v["medio"] == medio for v in estado["vouchers"])
+        }
+        tabla_agrupada = pd.DataFrame({
+            medio: pd.Series(importes, dtype=float)
+            for medio, importes in grupos.items()
+        })
+        tabla_agrupada.index = [str(i + 1) for i in range(len(tabla_agrupada))]
+        tabla_agrupada.index.name = "Posición en cada tipo de pago"
+        tabla_agrupada.loc["Subtotal"] = tabla_agrupada.sum()
+        st.subheader("Movimientos por tipo de pago")
         st.dataframe(
-            tabla_vouchers,
+            tabla_agrupada,
             use_container_width=True,
             column_config={
-                "hora": "Hora",
-                "medio": "Medio de pago",
-                "importe": st.column_config.NumberColumn("Importe", format="$ %.2f"),
-                "folio": "Folio / referencia",
+                medio: st.column_config.NumberColumn(medio, format="$ %.2f")
+                for medio in grupos
             },
         )
-        col_total, col_eliminar = st.columns([2, 1])
+        st.caption("Cada columna reúne un tipo de pago. Los espacios vacíos no representan movimientos.")
+        with st.expander("Detalle de movimientos y folios"):
+            st.caption("Consulta el medio de pago, importe, folio y hora de cada movimiento.")
+            st.dataframe(
+                tabla_vouchers.sort_values("medio", kind="stable"),
+                use_container_width=True,
+                column_config={
+                    "hora": "Hora",
+                    "medio": "Medio de pago",
+                    "importe": st.column_config.NumberColumn("Importe", format="$ %.2f"),
+                    "folio": "Folio / referencia",
+                },
+            )
+        col_total, col_eliminar = st.columns([1, 2])
         with col_total:
             st.metric("Total capturado", f"${tabla_vouchers['importe'].sum():,.2f}")
         with col_eliminar:
-            numero = st.number_input(
-                "Número de movimiento a eliminar",
-                min_value=1,
-                max_value=len(estado["vouchers"]),
-                step=1,
+            etiquetas = {
+                v["id"]: (
+                    f"{v['medio']} | ${v['importe']:,.2f} | "
+                    f"Folio: {v.get('folio') or 'Sin folio'} | "
+                    f"{v['hora']} | Registro {i + 1}"
+                )
+                for i, v in enumerate(estado["vouchers"])
+            }
+            if st.session_state.get("movimiento_a_eliminar") not in etiquetas:
+                st.session_state["movimiento_a_eliminar"] = None
+            movimiento_id = st.selectbox(
+                "Movimiento a eliminar",
+                options=list(etiquetas),
+                format_func=etiquetas.get,
+                index=None,
+                placeholder="Selecciona el movimiento por tipo de pago, importe y folio",
+                key="movimiento_a_eliminar",
             )
-            if st.button("Eliminar movimiento"):
-                estado["vouchers"].pop(int(numero) - 1)
-                st.rerun()
+            if st.button("Eliminar movimiento", disabled=movimiento_id is None or cerrada):
+                estado["vouchers"] = [
+                    v for v in estado["vouchers"] if v["id"] != movimiento_id
+                ]
+                estado.pop("documentos_cierre", None)
+                estado.pop("cierre_datos", None)
+                if _guardar_cambio(estado, repositorio, "eliminar_movimiento"):
+                    st.rerun()
+                st.stop()
     else:
         st.info("Todavía no hay movimientos registrados para este día.")
 
     st.divider()
     st.subheader("2. Comparar con el Corte Z")
+    st.session_state.setdefault("texto_corte_z", estado.get("texto_z", ""))
     texto_corte = st.text_area(
         "Pega aquí el Corte Z completo",
         height=220,
@@ -444,11 +641,14 @@ def mostrar_arqueo_caja():
         key="texto_corte_z",
     )
 
-    if st.button("Analizar Corte Z", type="primary"):
+    if st.button("Analizar Corte Z", type="primary", disabled=cerrada):
         try:
             corte = interpretar_corte_z(texto_corte)
             estado["ultimo_corte"] = corte
-            st.rerun()
+            estado["texto_z"] = texto_corte
+            if _guardar_cambio(estado, repositorio, "analizar_z"):
+                st.rerun()
+            st.stop()
         except ValueError as ex:
             st.error(str(ex))
 
@@ -517,21 +717,25 @@ def mostrar_arqueo_caja():
             confirmar_fecha = st.checkbox(
                 "Confirmo que este Corte Z pertenece a la fecha de trabajo seleccionada."
             )
-        if st.button("Guardar este arqueo", disabled=not confirmar_fecha):
+        if st.button("Guardar este arqueo", disabled=not confirmar_fecha or cerrada):
             estado["cortes"].append({
                 "hora": datetime.now().strftime("%H:%M"),
                 "corte_z": sum(corte["medios"].values()),
                 "capturado": sum(capturados.values()),
                 "diferencia": diferencia_total,
+                "cuadrado": abs(diferencia_total) < 0.01 and all(abs(v) < 0.01 for v in comparacion.get("Diferencia", [])),
+                "huella": huella_movimientos(estado["vouchers"]),
+                "desglose": corte["medios"],
             })
             estado["ultimo_corte"] = None
-            st.success("Arqueo guardado. Puedes seguir agregando vouchers durante el día.")
-            st.rerun()
+            if _guardar_cambio(estado, repositorio, "guardar_arqueo"):
+                st.rerun()
+            st.stop()
 
     if estado["cortes"]:
         st.divider()
         st.subheader("3. Historial del día")
-        historial = pd.DataFrame(estado["cortes"])
+        historial = pd.DataFrame(estado["cortes"])[["hora", "corte_z", "capturado", "diferencia"]]
         st.dataframe(
             historial,
             use_container_width=True,
@@ -546,30 +750,38 @@ def mostrar_arqueo_caja():
 
     st.divider()
     st.subheader("Cierre del día")
-    ultimo_arqueo_cuadrado = bool(estado["cortes"]) and abs(
-        float(estado["cortes"][-1]["diferencia"])
-    ) < 0.01
+    ultimo_arqueo_cuadrado = bool(estado["cortes"]) and estado["cortes"][-1].get("cuadrado", False) and (
+        estado["cortes"][-1].get("huella") == huella_movimientos(estado["vouchers"]))
     if not ultimo_arqueo_cuadrado:
         st.info(
             "Guarda primero un arqueo final cuadrado para habilitar la generación de documentos."
         )
 
+    st.session_state.setdefault("texto_corte_x", estado.get("texto_x", ""))
     texto_corte_x = st.text_area(
         "Pega aquí el Corte X completo",
         height=220,
         placeholder="Este reporte se pega una sola vez al finalizar el día.",
         key="texto_corte_x",
     )
-    if st.button("Analizar Corte X", disabled=not ultimo_arqueo_cuadrado):
+    if st.button("Analizar Corte X", disabled=not ultimo_arqueo_cuadrado or cerrada):
         try:
             estado["corte_x"] = interpretar_corte_x(texto_corte_x)
             estado.pop("documentos_cierre", None)
-            st.rerun()
+            estado.pop("cierre_datos", None)
+            estado["texto_x"] = texto_corte_x
+            if _guardar_cambio(estado, repositorio, "analizar_x"):
+                st.rerun()
+            st.stop()
         except ValueError as ex:
             st.error(str(ex))
 
     corte_x = estado.get("corte_x")
     if corte_x:
+        datos_guardados = estado.get("cierre_datos", {})
+        st.session_state.setdefault("cierre_piezas", datos_guardados.get("piezas", 0))
+        st.session_state.setdefault("cierre_tickets", datos_guardados.get("tickets", int(corte_x["tickets_efectivos"])))
+        st.session_state.setdefault("cierre_observaciones", datos_guardados.get("observaciones", ""))
         st.markdown("##### Información detectada")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Venta con IVA", f"${corte_x['venta']:,.2f}")
@@ -595,19 +807,21 @@ def mostrar_arqueo_caja():
                 min_value=0,
                 step=1,
                 key="cierre_piezas",
+                disabled=cerrada,
             )
         with col_tickets:
             tickets = st.number_input(
                 "Número de tickets para el estadillo",
                 min_value=0,
-                value=int(corte_x["tickets_efectivos"]),
                 step=1,
                 key="cierre_tickets",
+                disabled=cerrada,
                 help="Sinapsis descuenta las notas de crédito de las transacciones de venta.",
             )
         observaciones = st.text_area(
             "Observaciones para el formato de corte (opcional)",
             key="cierre_observaciones",
+            disabled=cerrada,
         )
         confirmar_fecha_x = True
         if fecha_x_distinta:
@@ -619,7 +833,7 @@ def mostrar_arqueo_caja():
         if st.button(
             "Generar documentos para revisión",
             type="primary",
-            disabled=not confirmar_fecha_x or piezas <= 0,
+            disabled=not confirmar_fecha_x or piezas <= 0 or not ultimo_arqueo_cuadrado or cerrada,
         ):
             try:
                 usuario_info = st.session_state.get("usuario_info", {})
@@ -642,9 +856,27 @@ def mostrar_arqueo_caja():
                         tickets,
                     ),
                 }
-                st.success("Documentos generados. Descárgalos y revísalos antes de enviarlos.")
+                estado["cierre_datos"] = {
+                    "piezas": int(piezas), "tickets": int(tickets), "observaciones": observaciones,
+                    "responsable": responsable, "fecha_confirmada": confirmar_fecha_x,
+                    "huella": huella_movimientos(estado["vouchers"]),
+                }
+                if _guardar_cambio(estado, repositorio, "preparar_documentos"):
+                    st.rerun()
+                st.stop()
             except Exception as ex:
                 st.error(f"No pude generar los documentos: {ex}")
+
+    if estado.get("cierre_datos") and not estado.get("documentos_cierre"):
+        datos = estado["cierre_datos"]
+        try:
+            estado["documentos_cierre"] = {
+                "corte": generar_formato_corte(fecha_trabajo, estado["corte_x"], estado["vouchers"], datos["responsable"], datos["observaciones"]),
+                "estadillo": generar_estadillo(fecha_trabajo, estado["corte_x"], datos["piezas"], datos["tickets"]),
+            }
+            st.session_state.arqueo_caja["documentos_cierre"] = estado["documentos_cierre"]
+        except Exception:
+            st.error("La jornada está guardada, pero no se pudieron reconstruir sus documentos. Revisa las plantillas privadas.")
 
     documentos = estado.get("documentos_cierre")
     if documentos:
@@ -667,3 +899,15 @@ def mostrar_arqueo_caja():
                 use_container_width=True,
             )
         st.warning("Estos archivos son borradores para revisión. Sinapsis todavía no envía correos.")
+        if repositorio is not None and not cerrada:
+            st.caption("El cierre definitivo guarda esta jornada y bloquea nuevas capturas y eliminaciones.")
+            datos = estado.get("cierre_datos", {})
+            total_coincide = abs(sum(v["importe"] for v in estado["vouchers"]) - estado.get("corte_x", {}).get("venta", 0)) < 0.01
+            listo = ultimo_arqueo_cuadrado and total_coincide and datos.get("fecha_confirmada", False) and (
+                datos.get("huella") == huella_movimientos(estado["vouchers"]))
+            if not total_coincide:
+                st.error("La venta del Corte X no coincide con los movimientos. Corrige la diferencia antes del cierre definitivo.")
+            if st.button("Confirmar cierre definitivo", disabled=not listo):
+                if _guardar_cambio(estado, repositorio, "cerrar", cerrar=True):
+                    st.rerun()
+                st.stop()

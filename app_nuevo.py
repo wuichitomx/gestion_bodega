@@ -20,6 +20,7 @@ from PIL import Image, ImageOps
 # Importamos las reglas maestras desde nuestro archivo de configuración
 from configuracion_ia import generar_prompt_maestro
 from arqueo_caja import mostrar_arqueo_caja
+from cajas_persistencia import RepositorioCajas, clave_de_servidor
 
 
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
@@ -1517,7 +1518,19 @@ with st.sidebar:
         )
 
 if pagina_actual == "💵 Arqueo de caja":
-    mostrar_arqueo_caja()
+    repositorio_cajas = None
+    if st.secrets.get("CAJAS_PERSISTENCIA", False):
+        clave_cajas = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        if not clave_de_servidor(clave_cajas):
+            st.error("Falta configurar la clave privada de servidor para guardar Cajas en Supabase.")
+            st.stop()
+        try:
+            cliente_cajas = create_client(st.secrets["SUPABASE_URL"], clave_cajas)
+            repositorio_cajas = RepositorioCajas(cliente_cajas, st.session_state.usuario_actual)
+        except Exception:
+            st.error("No se pudo configurar el guardado de Cajas. Revisa la configuración privada.")
+            st.stop()
+    mostrar_arqueo_caja(repositorio_cajas)
 
 # ------------------------------------------
 # 1. PESTAÑA: PERFORMANCE & KPIS (DASHBOARD)
