@@ -11,4 +11,4 @@ ventas_diarias_temp.csv
 .streamlit/secrets.toml
 
 # Plantillas operativas con información interna (se instalan localmente)
-plantillas_privadas/
+
