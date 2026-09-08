@@ -5,12 +5,14 @@ import zipfile
 import copy
 from uuid import uuid4
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
 import pandas as pd
 import streamlit as st
 from cajas_persistencia import ErrorPersistenciaCaja, huella_movimientos
+ZONA_HORARIA_CAJA = ZoneInfo("America/Mexico_City")
 
 
 MEDIOS_CAPTURA = [
@@ -372,7 +374,7 @@ def generar_estadillo(fecha_trabajo, corte_x, piezas, tickets):
 
 
 def _estado_inicial():
-    hoy = date.today().isoformat()
+    hoy = datetime.now(ZONA_HORARIA_CAJA).date().isoformat()
     usuario = st.session_state.get("usuario_actual", "")
     if "caja_usuario" not in st.session_state:
         # An existing session from before persistence has no ownership marker.
@@ -544,7 +546,7 @@ def mostrar_arqueo_caja(repositorio=None):
         else:
             estado["vouchers"].append({
                 "id": uuid4().hex,
-                "hora": datetime.now().strftime("%H:%M"),
+                "hora":datetime.now(ZONA_HORARIA_CAJA).strftime("%H:%M"), 
                 "medio": medio,
                 "importe": -float(importe) if medio == "NOTA CREDITO" else float(importe),
                 "folio": folio.strip(),
@@ -719,7 +721,7 @@ def mostrar_arqueo_caja(repositorio=None):
             )
         if st.button("Guardar este arqueo", disabled=not confirmar_fecha or cerrada):
             estado["cortes"].append({
-                "hora": datetime.now().strftime("%H:%M"),
+                "hora": datetime.now(ZONA_HORARIA_CAJA).strftime("%H:%M"),
                 "corte_z": sum(corte["medios"].values()),
                 "capturado": sum(capturados.values()),
                 "diferencia": diferencia_total,
