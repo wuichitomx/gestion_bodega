@@ -480,6 +480,26 @@ def _totales_para_corte_z(vouchers):
     return totales
 
 
+def _observacion_diferencias_clasificacion(comparacion):
+    """Describe diferencias por medio cuando el total general sí cuadra."""
+    diferencias = []
+    for _, fila in comparacion.iterrows():
+        diferencia = float(fila["Diferencia"])
+        if abs(diferencia) >= 0.01:
+            diferencias.append(
+                f"{fila['Medio de pago']}: capturado ${float(fila['Capturado']):,.2f}, "
+                f"Corte Z ${float(fila['Corte Z']):,.2f}, diferencia {diferencia:+,.2f}"
+            )
+    if not diferencias:
+        return ""
+    return (
+        "Diferencia de clasificación de medios de pago detectada. "
+        "El total general sí cuadra y se validaron los vouchers físicos. "
+        + "; ".join(diferencias)
+        + "."
+    )
+
+
 def mostrar_arqueo_caja(repositorio=None):
     estado = _estado_inicial()
 
@@ -702,33 +722,75 @@ def mostrar_arqueo_caja(repositorio=None):
             },
         )
         diferencia_total = float(comparacion["Diferencia"].sum()) if not comparacion.empty else 0.0
-        if abs(diferencia_total) < 0.01 and all(
+        total_cuadra = abs(diferencia_total) < 0.01
+        medios_cuadran = all(
             abs(valor) < 0.01 for valor in comparacion.get("Diferencia", [])
-        ):
+        )
+        diferencias_clasificacion = [
+            {
+                "medio": str(fila["Medio de pago"]),
+                "capturado": float(fila["Capturado"]),
+                "corte_z": float(fila["Corte Z"]),
+                "diferencia": float(fila["Diferencia"]),
+            }
+            for _, fila in comparacion.iterrows()
+            if abs(float(fila["Diferencia"])) >= 0.01
+        ]
+        observacion_automatica = _observacion_diferencias_clasificacion(comparacion)
+
+        aceptar_diferencias = False
+        if total_cuadra and medios_cuadran:
             st.success("Caja cuadrada: no hay diferencias por medio de pago.")
-        elif abs(diferencia_total) < 0.01:
+        elif total_cuadra:
             st.warning(
                 "El total general cuadra, pero hay movimientos clasificados en medios "
-                "de pago diferentes. Revisa las filas con diferencia."
+                "de pago diferentes. Si los vouchers físicos son correctos, puedes "
+                "confirmar la revisión y continuar."
             )
+            aceptar_diferencias = st.checkbox(
+                "Ya revisé los vouchers físicos y confirmo que son correctos. "
+                "Deseo continuar aunque el Corte Z tenga medios de pago cruzados.",
+                key="confirmar_diferencias_medios",
+                disabled=cerrada,
+            )
+            if observacion_automatica:
+                st.caption("Esta incidencia se agregará automáticamente a las observaciones del cierre.")
+                st.info(observacion_automatica)
         else:
-            st.error(f"La caja tiene una diferencia total de ${diferencia_total:,.2f}.")
+            st.error(
+                f"La caja tiene una diferencia total de ${diferencia_total:,.2f}. "
+                "El total general debe cuadrar antes de continuar."
+            )
 
         confirmar_fecha = True
         if fecha_corte and fecha_corte != fecha_trabajo:
             confirmar_fecha = st.checkbox(
                 "Confirmo que este Corte Z pertenece a la fecha de trabajo seleccionada."
             )
-        if st.button("Guardar este arqueo", disabled=not confirmar_fecha or cerrada):
+
+        arqueo_aceptable = total_cuadra and (medios_cuadran or aceptar_diferencias)
+        if st.button(
+            "Guardar este arqueo",
+            disabled=not confirmar_fecha or not arqueo_aceptable or cerrada,
+        ):
             estado["cortes"].append({
                 "hora": datetime.now(ZONA_HORARIA_CAJA).strftime("%H:%M"),
                 "corte_z": sum(corte["medios"].values()),
                 "capturado": sum(capturados.values()),
                 "diferencia": diferencia_total,
-                "cuadrado": abs(diferencia_total) < 0.01 and all(abs(v) < 0.01 for v in comparacion.get("Diferencia", [])),
+                "cuadrado": arqueo_aceptable,
+                "cuadrado_estricto": total_cuadra and medios_cuadran,
+                "aceptado_con_diferencias": total_cuadra and not medios_cuadran and aceptar_diferencias,
+                "diferencias_clasificacion": diferencias_clasificacion,
+                "observacion_automatica": observacion_automatica if aceptar_diferencias else "",
                 "huella": huella_movimientos(estado["vouchers"]),
                 "desglose": corte["medios"],
             })
+            if aceptar_diferencias and observacion_automatica:
+                estado["observacion_automatica"] = observacion_automatica
+                st.session_state.pop("cierre_observaciones", None)
+            elif medios_cuadran:
+                estado.pop("observacion_automatica", None)
             estado["ultimo_corte"] = None
             if _guardar_cambio(estado, repositorio, "guardar_arqueo"):
                 st.rerun()
@@ -756,7 +818,9 @@ def mostrar_arqueo_caja(repositorio=None):
         estado["cortes"][-1].get("huella") == huella_movimientos(estado["vouchers"]))
     if not ultimo_arqueo_cuadrado:
         st.info(
-            "Guarda primero un arqueo final cuadrado para habilitar la generación de documentos."
+            "Guarda primero un arqueo final válido para habilitar la generación de documentos. "
+            "Puede ser un arqueo sin diferencias o uno con total general cuadrado y diferencias "
+            "de clasificación confirmadas contra vouchers físicos."
         )
 
     st.session_state.setdefault("texto_corte_x", estado.get("texto_x", ""))
@@ -781,9 +845,12 @@ def mostrar_arqueo_caja(repositorio=None):
     corte_x = estado.get("corte_x")
     if corte_x:
         datos_guardados = estado.get("cierre_datos", {})
+        observacion_automatica = str(estado.get("observacion_automatica", "")).strip()
+        observaciones_guardadas = str(datos_guardados.get("observaciones", "")).strip()
+        observaciones_iniciales = observaciones_guardadas or observacion_automatica
         st.session_state.setdefault("cierre_piezas", datos_guardados.get("piezas", 0))
         st.session_state.setdefault("cierre_tickets", datos_guardados.get("tickets", int(corte_x["tickets_efectivos"])))
-        st.session_state.setdefault("cierre_observaciones", datos_guardados.get("observaciones", ""))
+        st.session_state.setdefault("cierre_observaciones", observaciones_iniciales)
         st.markdown("##### Información detectada")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Venta con IVA", f"${corte_x['venta']:,.2f}")
@@ -824,6 +891,11 @@ def mostrar_arqueo_caja(repositorio=None):
             "Observaciones para el formato de corte (opcional)",
             key="cierre_observaciones",
             disabled=cerrada,
+            help=(
+                "Si hubo diferencias de clasificación entre medios de pago y fueron "
+                "confirmadas contra vouchers físicos, Sinapsis agrega aquí una observación "
+                "automática. Puedes conservarla y añadir comentarios adicionales."
+            ),
         )
         confirmar_fecha_x = True
         if fecha_x_distinta:
