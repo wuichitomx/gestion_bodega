@@ -491,10 +491,10 @@ def normalizar_facturacion(facturacion, corte_x, exigir_global=False):
             raise ValueError(f"El ticket {ticket_raw!r} no es válido.") from None
         es_nota_credito = importe is not None and importe < -0.005
 
-if (ticket < inicio or ticket > fin) and not es_nota_credito:
-    raise ValueError(
-        f"El ticket {ticket} está fuera del rango {inicio}-{fin} del Corte X."
-    )
+        if (ticket < inicio or ticket > fin) and not es_nota_credito:
+            raise ValueError(
+                f"El ticket {ticket} está fuera del rango {inicio}-{fin} del Corte X."
+            )
         if ticket in tickets_usados:
             raise ValueError(f"El ticket {ticket} está repetido en facturas de clientes.")
         if not folio:
