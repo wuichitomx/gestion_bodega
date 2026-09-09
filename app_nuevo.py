@@ -19,7 +19,11 @@ from PIL import Image, ImageOps
 
 # Importamos las reglas maestras desde nuestro archivo de configuración
 from configuracion_ia import generar_prompt_maestro
-from arqueo_caja import mostrar_arqueo_caja
+import importlib
+import arqueo_caja
+
+importlib.reload(arqueo_caja)
+mostrar_arqueo_caja = arqueo_caja.mostrar_arqueo_caja
 from cajas_persistencia import RepositorioCajas, clave_de_servidor
 
 
