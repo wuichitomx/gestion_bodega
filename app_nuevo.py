@@ -14,7 +14,7 @@ from supabase import create_client
 import google.generativeai as genai
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from PIL import Image, ImageOps
 
 # Importamos las reglas maestras desde nuestro archivo de configuración
@@ -23,7 +23,7 @@ from arqueo_caja import mostrar_arqueo_caja
 from cajas_persistencia import RepositorioCajas, clave_de_servidor
 
 
-GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 
 class ArchivoExcelDrive(io.BytesIO):
@@ -55,9 +55,8 @@ def _configuracion_google_drive():
     return folder_id, informacion
 
 
-@st.cache_resource(show_spinner=False)
 def obtener_servicio_google_drive():
-    """Crea el cliente de solo lectura para Google Drive."""
+    """Crea un cliente nuevo de Drive para evitar conexiones HTTP obsoletas entre reruns."""
     _, informacion = _configuracion_google_drive()
     credenciales = service_account.Credentials.from_service_account_info(
         informacion,
@@ -87,7 +86,7 @@ def listar_archivos_excel_drive():
                 pageSize=1000,
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True,
-            ).execute()
+            ).execute(num_retries=3)
             for elemento in respuesta.get("files", []):
                 if elemento.get("mimeType") == "application/vnd.google-apps.folder":
                     pendientes.append(
@@ -118,8 +117,196 @@ def descargar_archivo_excel_drive(file_id, nombre, modified_time):
     descargador = MediaIoBaseDownload(salida, solicitud)
     terminado = False
     while not terminado:
-        _, terminado = descargador.next_chunk()
+        _, terminado = descargador.next_chunk(num_retries=3)
     return salida.getvalue()
+
+
+def obtener_o_crear_carpeta_drive(nombre, parent_id=None):
+    """Busca una carpeta hija por nombre exacto y la crea si no existe."""
+    folder_id_raiz, _ = _configuracion_google_drive()
+    parent_id = parent_id or folder_id_raiz
+    servicio = obtener_servicio_google_drive()
+
+    nombre_query = (
+        str(nombre)
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+    )
+
+    respuesta = servicio.files().list(
+        q=(
+            f"'{parent_id}' in parents "
+            f"and name = '{nombre_query}' "
+            "and mimeType = 'application/vnd.google-apps.folder' "
+            "and trashed = false"
+        ),
+        fields="files(id,name)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute(num_retries=3)
+
+    carpetas = respuesta.get("files", [])
+    if carpetas:
+        return carpetas[0]
+
+    carpeta = servicio.files().create(
+        body={
+            "name": nombre,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id],
+        },
+        fields="id,name",
+        supportsAllDrives=True,
+    ).execute(num_retries=3)
+
+    listar_archivos_excel_drive.clear()
+    return carpeta
+
+
+MESES_DRIVE_CAJA = {
+    1: "ENERO", 2: "FEBRERO", 3: "MARZO", 4: "ABRIL",
+    5: "MAYO", 6: "JUNIO", 7: "JULIO", 8: "AGOSTO",
+    9: "SEPTIEMBRE", 10: "OCTUBRE", 11: "NOVIEMBRE", 12: "DICIEMBRE",
+}
+
+
+def _escapar_query_drive(valor):
+    return str(valor).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def obtener_carpeta_cortes_por_fecha(fecha_trabajo):
+    """Obtiene CORTES DE CAJA / AÑO / MES, creando lo que falte."""
+    raiz = obtener_o_crear_carpeta_drive("CORTES DE CAJA")
+    carpeta_anio = obtener_o_crear_carpeta_drive(str(fecha_trabajo.year), raiz["id"])
+    nombre_mes = MESES_DRIVE_CAJA[fecha_trabajo.month]
+    carpeta_mes = obtener_o_crear_carpeta_drive(nombre_mes, carpeta_anio["id"])
+    return {
+        "id": carpeta_mes["id"],
+        "nombre": carpeta_mes.get("name", nombre_mes),
+        "ruta": f"CORTES DE CAJA/{fecha_trabajo.year}/{nombre_mes}",
+        "anio_id": carpeta_anio["id"],
+    }
+
+
+def buscar_archivo_drive_en_carpeta(parent_id, nombre):
+    """Busca un archivo exacto dentro de una carpeta concreta de Drive."""
+    servicio = obtener_servicio_google_drive()
+    nombre_query = _escapar_query_drive(nombre)
+    respuesta = servicio.files().list(
+        q=(
+            f"'{parent_id}' in parents "
+            f"and name = '{nombre_query}' "
+            "and trashed = false"
+        ),
+        fields="files(id,name,mimeType,modifiedTime,size)",
+        pageSize=20,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute(num_retries=3)
+    archivos = respuesta.get("files", [])
+    return archivos[0] if archivos else None
+
+
+def descargar_archivo_drive_por_id(file_id):
+    """Descarga cualquier archivo binario de Drive y devuelve sus bytes."""
+    servicio = obtener_servicio_google_drive()
+    solicitud = servicio.files().get_media(fileId=file_id)
+    salida = io.BytesIO()
+    descargador = MediaIoBaseDownload(salida, solicitud)
+    terminado = False
+    while not terminado:
+        _, terminado = descargador.next_chunk(num_retries=3)
+    return salida.getvalue()
+
+
+def guardar_archivo_drive(parent_id, nombre, contenido, mime_type):
+    """Actualiza un maestro existente; nunca crea archivos Excel."""
+    servicio = obtener_servicio_google_drive()
+    existente = buscar_archivo_drive_en_carpeta(parent_id, nombre)
+    media = MediaIoBaseUpload(
+        io.BytesIO(contenido),
+        mimetype=mime_type,
+        resumable=False,
+    )
+    if existente:
+        return servicio.files().update(
+            fileId=existente["id"],
+            media_body=media,
+            fields="id,name,mimeType,modifiedTime,size",
+            supportsAllDrives=True,
+        ).execute(num_retries=3)
+    raise FileNotFoundError(
+        f"No se encontró en Google Drive el archivo maestro '{nombre}' "
+        f"dentro de la carpeta con ID '{parent_id}'."
+    )
+
+
+def cargar_maestro_corte_drive(fecha_trabajo):
+    """Trae la versión mensual más reciente; si no existe, devuelve None."""
+    carpeta = obtener_carpeta_cortes_por_fecha(fecha_trabajo)
+    nombre_mes = MESES_DRIVE_CAJA[fecha_trabajo.month]
+    nombre = f"MERIDA - CORTE DE CAJA - {nombre_mes} {fecha_trabajo.year}.xlsx"
+    archivo = buscar_archivo_drive_en_carpeta(carpeta["id"], nombre)
+    if not archivo:
+        return None
+    return {
+        "contenido": descargar_archivo_drive_por_id(archivo["id"]),
+        "nombre": nombre,
+        "id": archivo["id"],
+        "ruta": f"{carpeta['ruta']}/{nombre}",
+        "modifiedTime": archivo.get("modifiedTime", ""),
+    }
+
+
+def guardar_documentos_caja_drive(fecha_trabajo, documentos):
+    """Guarda el libro maestro mensual y el estadillo en la ruta de la jornada."""
+    carpeta = obtener_carpeta_cortes_por_fecha(fecha_trabajo)
+    nombre_mes = MESES_DRIVE_CAJA[fecha_trabajo.month]
+    nombre_corte = f"MERIDA - CORTE DE CAJA - {nombre_mes} {fecha_trabajo.year}.xlsx"
+    nombre_estadillo = f"MERIDA - ESTADILLO - {fecha_trabajo.year}.xlsm"
+
+    corte = guardar_archivo_drive(
+        carpeta["id"],
+        nombre_corte,
+        documentos["corte"],
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    estadillo = guardar_archivo_drive(
+        carpeta["anio_id"],
+        nombre_estadillo,
+        documentos["estadillo"],
+        "application/vnd.ms-excel.sheet.macroEnabled.12",
+    )
+    return {
+        "ruta": carpeta["ruta"],
+        "corte": corte,
+        "estadillo": estadillo,
+        "nombre_corte": nombre_corte,
+        "nombre_estadillo": nombre_estadillo,
+    }
+
+
+def cargar_maestro_estadillo_drive(fecha_trabajo):
+    """Carga el maestro anual vigente para conservar los días ya registrados."""
+    carpeta = obtener_carpeta_cortes_por_fecha(fecha_trabajo)
+    nombre = f"MERIDA - ESTADILLO - {fecha_trabajo.year}.xlsm"
+    archivo = buscar_archivo_drive_en_carpeta(carpeta["anio_id"], nombre)
+    if not archivo:
+        raise FileNotFoundError(f"No se encontró en Google Drive el archivo maestro '{nombre}'.")
+    return {"contenido": descargar_archivo_drive_por_id(archivo["id"]), "nombre": nombre}
+
+
+def guardar_corte_caja_drive(fecha_trabajo, contenido_corte):
+    """Actualiza únicamente el Corte mensual; no escribe en el Estadillo."""
+    carpeta = obtener_carpeta_cortes_por_fecha(fecha_trabajo)
+    nombre_mes = MESES_DRIVE_CAJA[fecha_trabajo.month]
+    nombre = f"MERIDA - CORTE DE CAJA - {nombre_mes} {fecha_trabajo.year}.xlsx"
+    corte = guardar_archivo_drive(
+        carpeta["id"], nombre, contenido_corte,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    return {"ruta": carpeta["ruta"], "corte": corte, "nombre_corte": nombre}
 
 
 def seleccionar_excel_dispositivo_o_drive(
@@ -1145,7 +1332,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.28 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.29 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -1175,7 +1362,7 @@ if not st.session_state.autenticado:
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.28 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.29 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
@@ -1183,6 +1370,7 @@ with st.sidebar:
         st.session_state.es_admin = False
         st.session_state.felicitacion_mostrada = False
         st.rerun()
+
     st.markdown("---")
 
 # ==========================================
@@ -1530,7 +1718,13 @@ if pagina_actual == "💵 Arqueo de caja":
         except Exception:
             st.error("No se pudo configurar el guardado de Cajas. Revisa la configuración privada.")
             st.stop()
-    mostrar_arqueo_caja(repositorio_cajas)
+    mostrar_arqueo_caja(
+        repositorio_cajas,
+        cargar_maestro_corte=cargar_maestro_corte_drive,
+        guardar_documentos_drive=guardar_documentos_caja_drive,
+        guardar_corte_drive=guardar_corte_caja_drive,
+        cargar_maestro_estadillo=cargar_maestro_estadillo_drive,
+    )
 
 # ------------------------------------------
 # 1. PESTAÑA: PERFORMANCE & KPIS (DASHBOARD)

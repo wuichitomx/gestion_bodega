@@ -3,6 +3,7 @@ import os
 import re
 import zipfile
 import copy
+import math
 from uuid import uuid4
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -220,9 +221,16 @@ def _columna_xml(referencia):
     return numero
 
 
-def _editar_ooxml(ruta, cambios_por_hoja):
-    """Cambia celdas puntuales sin reconstruir el libro ni sus macros."""
-    with zipfile.ZipFile(ruta, "r") as origen:
+def _editar_ooxml(ruta, cambios_por_hoja, limpiar_por_hoja=None):
+    """Cambia celdas puntuales sin reconstruir el libro ni sus macros.
+
+    limpiar_por_hoja permite borrar únicamente el contenido de celdas de captura
+    antes de escribir los datos actuales, conservando formato, protección y
+    estructura de la plantilla.
+    """
+    limpiar_por_hoja = limpiar_por_hoja or {}
+    origen_zip = io.BytesIO(ruta) if isinstance(ruta, (bytes, bytearray)) else ruta
+    with zipfile.ZipFile(origen_zip, "r") as origen:
         archivos = {nombre: origen.read(nombre) for nombre in origen.namelist()}
 
     libro = ET.fromstring(archivos["xl/workbook.xml"])
@@ -252,6 +260,17 @@ def _editar_ooxml(ruta, cambios_por_hoja):
             for fila in _hijos_xml(datos, "row")
             for celda in _hijos_xml(fila, "c")
         }
+
+        for referencia in limpiar_por_hoja.get(nombre_hoja, []):
+            celda = celdas.get(referencia)
+            if celda is None:
+                continue
+            for nombre in ("f", "v", "is"):
+                for hijo in _hijos_xml(celda, nombre):
+                    celda.removeChild(hijo)
+            if celda.hasAttribute("t"):
+                celda.removeAttribute("t")
+
         for referencia, valor in cambios.items():
             celda = celdas.get(referencia)
             if celda is None:
@@ -310,6 +329,29 @@ def _editar_ooxml(ruta, cambios_por_hoja):
     archivos["xl/workbook.xml"] = documento_libro.toxml(encoding="utf-8")
     documento_libro.unlink()
 
+    if "xl/calcChain.xml" in archivos:
+        del archivos["xl/calcChain.xml"]
+
+        relaciones_libro = minidom.parseString(archivos["xl/_rels/workbook.xml.rels"])
+        for nodo in list(relaciones_libro.documentElement.childNodes):
+            if (
+                nodo.nodeType == nodo.ELEMENT_NODE
+                and nodo.getAttribute("Type").endswith("/calcChain")
+            ):
+                relaciones_libro.documentElement.removeChild(nodo)
+        archivos["xl/_rels/workbook.xml.rels"] = relaciones_libro.toxml(encoding="utf-8")
+        relaciones_libro.unlink()
+
+        tipos = minidom.parseString(archivos["[Content_Types].xml"])
+        for nodo in list(tipos.documentElement.childNodes):
+            if (
+                nodo.nodeType == nodo.ELEMENT_NODE
+                and nodo.getAttribute("PartName") == "/xl/calcChain.xml"
+            ):
+                tipos.documentElement.removeChild(nodo)
+        archivos["[Content_Types].xml"] = tipos.toxml(encoding="utf-8")
+        tipos.unlink()
+
     salida = io.BytesIO()
     with zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED) as destino:
         for nombre, contenido in archivos.items():
@@ -317,10 +359,251 @@ def _editar_ooxml(ruta, cambios_por_hoja):
     return salida.getvalue()
 
 
-def generar_formato_corte(fecha_trabajo, corte_x, vouchers, responsable, observaciones=""):
-    ruta = _ruta_plantilla("formato_corte_caja.xlsx")
-    if not os.path.exists(ruta):
-        raise FileNotFoundError("Falta instalar la plantilla privada del formato de Corte de Caja.")
+def _valor_celda_ooxml(archivos, celda):
+    """Lee el valor visible de una celda OOXML sin depender de openpyxl."""
+    if celda is None:
+        return None
+    tipo = celda.getAttribute("t")
+    if tipo == "inlineStr":
+        nodos_is = _hijos_xml(celda, "is")
+        if not nodos_is:
+            return ""
+        textos = []
+        for nodo in nodos_is[0].getElementsByTagNameNS(NS_MAIN, "t"):
+            textos.append("".join(h.data for h in nodo.childNodes if h.nodeType == h.TEXT_NODE))
+        return "".join(textos)
+
+    nodos_v = _hijos_xml(celda, "v")
+    if not nodos_v:
+        return None
+    valor = "".join(h.data for h in nodos_v[0].childNodes if h.nodeType == h.TEXT_NODE)
+
+    if tipo == "s":
+        try:
+            indice = int(valor)
+            compartidos = minidom.parseString(archivos.get("xl/sharedStrings.xml", b""))
+            items = compartidos.getElementsByTagNameNS(NS_MAIN, "si")
+            if indice < len(items):
+                textos = []
+                for nodo in items[indice].getElementsByTagNameNS(NS_MAIN, "t"):
+                    textos.append("".join(h.data for h in nodo.childNodes if h.nodeType == h.TEXT_NODE))
+                compartidos.unlink()
+                return "".join(textos)
+            compartidos.unlink()
+        except Exception:
+            return valor
+    return valor
+
+
+def leer_celdas_ooxml(ruta, hoja_nombre, referencias):
+    """Devuelve valores de celdas concretas de una hoja del libro."""
+    origen_zip = io.BytesIO(ruta) if isinstance(ruta, (bytes, bytearray)) else ruta
+    with zipfile.ZipFile(origen_zip, "r") as origen:
+        archivos = {nombre: origen.read(nombre) for nombre in origen.namelist()}
+
+    libro = ET.fromstring(archivos["xl/workbook.xml"])
+    relaciones = ET.fromstring(archivos["xl/_rels/workbook.xml.rels"])
+    destinos = {
+        relacion.attrib["Id"]: relacion.attrib["Target"]
+        for relacion in relaciones.findall(f"{{{NS_REL_PKG}}}Relationship")
+    }
+    ruta_xml = None
+    for hoja in libro.find(f"{{{NS_MAIN}}}sheets"):
+        if hoja.attrib.get("name") == hoja_nombre:
+            relacion_id = hoja.attrib[f"{{{NS_REL_DOC}}}id"]
+            destino = destinos[relacion_id].replace("\\", "/")
+            ruta_xml = destino.lstrip("/") if destino.startswith("/xl/") else "xl/" + destino.lstrip("/")
+            break
+    if not ruta_xml or ruta_xml not in archivos:
+        raise ValueError(f"El libro no contiene la pestaña {hoja_nombre}.")
+
+    documento = minidom.parseString(archivos[ruta_xml])
+    datos = _hijos_xml(documento.documentElement, "sheetData")[0]
+    celdas = {
+        celda.getAttribute("r"): celda
+        for fila in _hijos_xml(datos, "row")
+        for celda in _hijos_xml(fila, "c")
+    }
+    resultado = {ref: _valor_celda_ooxml(archivos, celdas.get(ref)) for ref in referencias}
+    documento.unlink()
+    return resultado
+
+
+def _texto_limpio(valor):
+    if valor is None:
+        return ""
+    return "" if pd.isna(valor) else str(valor).strip()
+
+
+def _importe_factura(valor):
+    if valor is None or valor == "":
+        return None
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numero):
+        raise ValueError("El importe debe ser un número finito.")
+    return round(numero, 2)
+
+
+def _rangos_consecutivos(numeros):
+    numeros = sorted(set(int(n) for n in numeros))
+    if not numeros:
+        return []
+    rangos = []
+    inicio = anterior = numeros[0]
+    for numero in numeros[1:]:
+        if numero == anterior + 1:
+            anterior = numero
+            continue
+        rangos.append(str(inicio) if inicio == anterior else f"{inicio}-{anterior}")
+        inicio = anterior = numero
+    rangos.append(str(inicio) if inicio == anterior else f"{inicio}-{anterior}")
+    return rangos
+
+
+def normalizar_facturacion(facturacion, corte_x, exigir_global=False):
+    """Valida facturas de clientes y calcula los rangos de público general."""
+    facturacion = facturacion or {}
+    inicio = int(corte_x["consecutivo_inicial"])
+    fin = int(corte_x["consecutivo_final"])
+    if inicio > fin:
+        raise ValueError("El rango de tickets del Corte X no es válido.")
+    clientes = []
+    tickets_usados = set()
+
+    for fila in facturacion.get("clientes", []) or []:
+        ticket_raw = fila.get("ticket")
+        folio = _texto_limpio(fila.get("folio"))
+        importe = _importe_factura(fila.get("importe"))
+        vacia = (ticket_raw in (None, "")) and not folio and importe is None
+        if vacia:
+            continue
+        if ticket_raw in (None, ""):
+            raise ValueError("Hay una factura de cliente sin número de ticket.")
+        try:
+            numero_ticket = float(ticket_raw)
+            if not math.isfinite(numero_ticket) or not numero_ticket.is_integer():
+                raise ValueError("El ticket debe ser entero.")
+            ticket = int(numero_ticket)
+        except (TypeError, ValueError):
+            raise ValueError(f"El ticket {ticket_raw!r} no es válido.") from None
+        if ticket < inicio or ticket > fin:
+            raise ValueError(f"El ticket {ticket} está fuera del rango {inicio}-{fin} del Corte X.")
+        if ticket in tickets_usados:
+            raise ValueError(f"El ticket {ticket} está repetido en facturas de clientes.")
+        if not folio:
+            raise ValueError(f"Falta el folio de factura para el ticket {ticket}.")
+        if importe is None or abs(importe) < 0.005:
+            raise ValueError(f"Falta un importe válido para el ticket {ticket}.")
+        tickets_usados.add(ticket)
+        clientes.append({"ticket": ticket, "folio": folio, "importe": importe})
+
+    if len(clientes) > 11:
+        raise ValueError("El formato admite como máximo 11 facturas de cliente por día.")
+
+    folio_global = _texto_limpio(facturacion.get("folio_global"))
+    tickets_publico = [numero for numero in range(inicio, fin + 1) if numero not in tickets_usados]
+    rangos_publico = _rangos_consecutivos(tickets_publico)
+    if len(rangos_publico) > 6:
+        raise ValueError(
+            "La separación de tickets de público general genera más de 6 bloques. "
+            "El machote sólo tiene espacio en C70:C75; revisa las facturas de cliente."
+        )
+    if folio_global and not tickets_publico:
+        raise ValueError("No quedan tickets para público general, por lo que no corresponde capturar una factura global.")
+    if exigir_global and tickets_publico and not folio_global:
+        raise ValueError("Falta el folio de la factura de público general.")
+
+    return {
+        "clientes": sorted(clientes, key=lambda x: x["ticket"]),
+        "folio_global": folio_global,
+        "rangos_publico": rangos_publico,
+        "tickets_publico": tickets_publico,
+    }
+
+
+def leer_facturacion_formato_corte(contenido, fecha_trabajo, corte_x=None):
+    """Lee la facturación ya escrita en el machote mensual."""
+    hoja = f"{fecha_trabajo.day:02d}"
+    referencias = []
+    for fila in range(58, 69):
+        referencias.extend((f"C{fila}", f"E{fila}", f"G{fila}"))
+    referencias.extend([f"C{fila}" for fila in range(70, 76)])
+    referencias.append("E72")
+    valores = leer_celdas_ooxml(contenido, hoja, referencias)
+
+    clientes = []
+    for fila in range(58, 69):
+        ticket = valores.get(f"C{fila}")
+        folio = _texto_limpio(valores.get(f"E{fila}"))
+        importe = _importe_factura(valores.get(f"G{fila}"))
+        if ticket in (None, "") and not folio and importe is None:
+            continue
+        try:
+            ticket_num = int(float(ticket)) if ticket not in (None, "") else None
+        except (TypeError, ValueError):
+            ticket_num = None
+        clientes.append({"ticket": ticket_num, "folio": folio, "importe": importe})
+
+    rangos = [_texto_limpio(valores.get(f"C{fila}")) for fila in range(70, 76)]
+    rangos = [r for r in rangos if r]
+    resultado = {
+        "clientes": clientes,
+        "folio_global": _texto_limpio(valores.get("E72")),
+        "rangos_publico": rangos,
+    }
+    if corte_x is not None:
+        try:
+            normalizada = normalizar_facturacion(resultado, corte_x)
+            resultado.update(normalizada)
+        except ValueError:
+            pass
+    return resultado
+
+
+def _cambios_facturacion_excel(facturacion, corte_x):
+    """Convierte la facturación validada al mapa exacto de celdas del machote."""
+    normalizada = normalizar_facturacion(facturacion, corte_x)
+    cambios = {}
+    clientes = normalizada["clientes"]
+    for indice, cliente in enumerate(clientes, start=58):
+        cambios[f"C{indice}"] = cliente["ticket"]
+        cambios[f"E{indice}"] = cliente["folio"]
+        cambios[f"G{indice}"] = cliente["importe"]
+
+    # Público general sólo se escribe cuando ya existe el folio global.
+    if normalizada["folio_global"]:
+        for indice, rango in enumerate(normalizada["rangos_publico"], start=70):
+            cambios[f"C{indice}"] = rango
+        cambios["E72"] = normalizada["folio_global"]
+    return cambios, normalizada
+
+def actualizar_facturacion_corte(contenido, fecha_trabajo, corte_x, facturacion):
+    """Modifica sólo la facturación del día, conservando el cierre y otras hojas."""
+    cambios, _ = _cambios_facturacion_excel(facturacion, corte_x)
+    hoja = f"{fecha_trabajo.day:02d}"
+    limpiar = ([f"{col}{fila}" for fila in range(58, 69) for col in ("C", "E", "G")]
+               + [f"C{fila}" for fila in range(70, 76)] + ["E72"])
+    return _editar_ooxml(contenido, {hoja: cambios}, {hoja: limpiar})
+
+
+def generar_formato_corte(
+    fecha_trabajo,
+    corte_x,
+    vouchers,
+    responsable,
+    observaciones="",
+    plantilla_bytes=None,
+    facturacion=None,
+):
+    if plantilla_bytes is not None:
+        ruta = plantilla_bytes
+    else:
+        ruta = _ruta_plantilla("formato_corte_caja.xlsx")
+        if not os.path.exists(ruta):
+            raise FileNotFoundError("Falta instalar la plantilla privada del formato de Corte de Caja.")
     hoja_nombre = f"{fecha_trabajo.day:02d}"
     detalle = _totales_capturados(vouchers)
     cambios = {
@@ -348,8 +631,31 @@ def generar_formato_corte(fecha_trabajo, corte_x, vouchers, responsable, observa
         "E44": detalle.get("TC BANAMEX - MESES SIN INTERESES", 0.0),
     }
     rango_tickets = f"{corte_x['consecutivo_inicial']}-{corte_x['consecutivo_final']}"
-    cambios.update({"C53": rango_tickets, "C72": rango_tickets, "B78": observaciones.strip(), "D82": responsable.strip()})
-    return _editar_ooxml(ruta, {hoja_nombre: cambios})
+    cambios.update({
+        "C53": rango_tickets,
+        "B78": observaciones.strip(),
+        "D82": responsable.strip(),
+    })
+
+    limpiar = [
+        "G3", "C5",
+        "E11", "E17", "E22", "E23", "E25", "E26",
+        "E29", "E30", "E35", "E36", "E38", "E41", "E42", "E44",
+        "C53",
+        *[f"C{fila}" for fila in range(58, 69)],
+        *[f"E{fila}" for fila in range(58, 69)],
+        *[f"G{fila}" for fila in range(58, 69)],
+        "C71", "C72", "C73", "E71", "E72", "E73", "G71", "G73",
+        "B78", "D82",
+    ]
+    cambios_facturacion, _ = _cambios_facturacion_excel(facturacion or {}, corte_x)
+    cambios.update(cambios_facturacion)
+    limpiar.extend(f"C{fila}" for fila in range(70, 76))
+    return _editar_ooxml(
+        ruta,
+        {hoja_nombre: cambios},
+        limpiar_por_hoja={hoja_nombre: limpiar},
+    )
 
 
 MESES_ESTADILLO = {
@@ -358,9 +664,9 @@ MESES_ESTADILLO = {
 }
 
 
-def generar_estadillo(fecha_trabajo, corte_x, piezas, tickets):
-    ruta = _ruta_plantilla("estadillo_2026.xlsm")
-    if not os.path.exists(ruta):
+def generar_estadillo(fecha_trabajo, corte_x, piezas, tickets, plantilla_bytes=None):
+    ruta = plantilla_bytes if plantilla_bytes is not None else _ruta_plantilla("estadillo_2026.xlsm")
+    if plantilla_bytes is None and not os.path.exists(ruta):
         raise FileNotFoundError("Falta instalar la plantilla privada del estadillo.")
     fila = 14 + fecha_trabajo.day
     return _editar_ooxml(
@@ -396,7 +702,14 @@ def _estado_inicial():
     return st.session_state.arqueo_caja
 
 
+def _limpiar_campos_facturacion():
+    for clave in list(st.session_state):
+        if str(clave).startswith(("editor_facturas_clientes_", "folio_global_")):
+            st.session_state.pop(clave, None)
+
+
 def _limpiar_campos_caja():
+    _limpiar_campos_facturacion()
     for clave in ("arqueo_fecha_trabajo", "texto_corte_z", "texto_corte_x", "cierre_piezas",
                   "cierre_tickets", "cierre_observaciones", "confirmar_fecha_corte_x",
                   "importe_voucher", "movimiento_a_eliminar", "caja_cargada"):
@@ -452,6 +765,7 @@ def _cargar_jornada(estado, repositorio):
 def _reiniciar_si_cambia_fecha(estado, fecha_trabajo):
     fecha_iso = fecha_trabajo.isoformat()
     if estado["fecha"] != fecha_iso:
+        _limpiar_campos_facturacion()
         st.session_state.arqueo_caja = {
             "fecha": fecha_iso,
             "vouchers": [],
@@ -500,7 +814,107 @@ def _observacion_diferencias_clasificacion(comparacion):
     )
 
 
-def mostrar_arqueo_caja(repositorio=None):
+def _dataframe_facturas_clientes(facturacion):
+    filas = []
+    clientes = (facturacion or {}).get("clientes", []) or []
+    for indice in range(11):
+        cliente = clientes[indice] if indice < len(clientes) else {}
+        filas.append({
+            "Ticket": cliente.get("ticket"),
+            "Folio factura": cliente.get("folio", ""),
+            "Importe": cliente.get("importe"),
+        })
+    return pd.DataFrame(filas).astype({"Ticket": "float64", "Folio factura": "string", "Importe": "float64"})
+
+
+def _facturacion_desde_editor(tabla, folio_global):
+    clientes = []
+    for _, fila in tabla.iterrows():
+        ticket = fila.get("Ticket")
+        folio = fila.get("Folio factura")
+        importe = fila.get("Importe")
+        ticket_vacio = pd.isna(ticket) if not isinstance(ticket, str) else not ticket.strip()
+        importe_vacio = pd.isna(importe) if not isinstance(importe, str) else not importe.strip()
+        if ticket_vacio and not _texto_limpio(folio) and importe_vacio:
+            continue
+        clientes.append({
+            "ticket": None if ticket_vacio else ticket,
+            "folio": _texto_limpio(folio),
+            "importe": None if importe_vacio else importe,
+        })
+    return {"clientes": clientes, "folio_global": _texto_limpio(folio_global)}
+
+
+def _mostrar_preview_corte(fecha_trabajo, corte_x, vouchers, cierre_datos, facturacion):
+    st.markdown("#### Vista previa del Corte de Caja")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Fecha", fecha_trabajo.strftime("%d/%m/%Y"))
+    col2.metric("Venta total", f"${float(corte_x['venta']):,.2f}")
+    col3.metric("Tickets", f"{corte_x['consecutivo_inicial']}-{corte_x['consecutivo_final']}")
+    col4.metric("Piezas", str(cierre_datos.get("piezas", 0)))
+
+    detalle = _totales_capturados(vouchers)
+    pagos = pd.DataFrame([
+        {"Medio de pago": medio, "Importe": importe}
+        for medio, importe in detalle.items()
+        if abs(float(importe)) >= 0.005
+    ])
+    if not pagos.empty:
+        st.markdown("##### Medios de pago")
+        st.dataframe(
+            pagos,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Importe": st.column_config.NumberColumn("Importe", format="$ %.2f")},
+        )
+
+    clientes = (facturacion or {}).get("clientes", []) or []
+    st.markdown("##### Facturación")
+    if clientes:
+        tabla = pd.DataFrame([
+            {
+                "Ticket": item.get("ticket"),
+                "Folio factura": item.get("folio", ""),
+                "Importe": item.get("importe"),
+            }
+            for item in clientes
+        ])
+        st.dataframe(
+            tabla,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Importe": st.column_config.NumberColumn("Importe", format="$ %.2f")},
+        )
+    else:
+        st.caption("Sin facturas de cliente capturadas.")
+
+    folio_global = _texto_limpio((facturacion or {}).get("folio_global"))
+    rangos = (facturacion or {}).get("rangos_publico", []) or []
+    importe_clientes = sum(float(item.get("importe") or 0) for item in clientes)
+    importe_global_estimado = float(corte_x["venta"]) - importe_clientes
+    col_global1, col_global2 = st.columns(2)
+    with col_global1:
+        st.markdown("**Factura de público general**")
+        st.write(f"Folio: {folio_global or 'Pendiente'}")
+        st.write(f"Tickets: {', '.join(rangos) if rangos else 'Pendiente'}")
+    with col_global2:
+        st.markdown("**Importe calculado por el machote**")
+        st.write(f"${importe_global_estimado:,.2f}")
+        st.caption("El importe real permanece calculado por la fórmula G72 del Excel.")
+
+    responsable = _texto_limpio(cierre_datos.get("responsable"))
+    observaciones = _texto_limpio(cierre_datos.get("observaciones"))
+    st.caption(f"Responsable: {responsable or 'Sin responsable'}")
+    if observaciones:
+        st.caption(f"Observaciones: {observaciones}")
+
+def mostrar_arqueo_caja(
+    repositorio=None,
+    cargar_maestro_corte=None,
+    guardar_documentos_drive=None,
+    guardar_corte_drive=None,
+    cargar_maestro_estadillo=None,
+):
     estado = _estado_inicial()
 
     st.header("Arqueo de caja")
@@ -515,8 +929,18 @@ def mostrar_arqueo_caja(repositorio=None):
         key="arqueo_fecha_trabajo",
     )
     _reiniciar_si_cambia_fecha(estado, fecha_trabajo)
+
+    def _obtener_base_corte_drive():
+        if cargar_maestro_corte is None:
+            return None
+        maestro = cargar_maestro_corte(fecha_trabajo)
+        if maestro and maestro.get("contenido"):
+            return maestro
+        return None
+
     if repositorio is not None:
         if st.button("Recargar datos guardados"):
+            _limpiar_campos_facturacion()
             st.session_state.pop("caja_cargada", None)
             st.session_state["caja_forzar_recarga"] = True
             for clave in ("texto_corte_z", "texto_corte_x", "cierre_piezas", "cierre_tickets", "cierre_observaciones"):
@@ -536,21 +960,21 @@ def mostrar_arqueo_caja(repositorio=None):
     with st.form("form_nuevo_voucher", clear_on_submit=True):
         col1, col2, col3 = st.columns([2, 1, 2])
         with col1:
-            medio = st.selectbox("Medio de pago", MEDIOS_CAPTURA)
+            medio = st.selectbox("Medio de pago", MEDIOS_CAPTURA, disabled=cerrada)
         with col2:
             importe = st.number_input(
                 "Importe", min_value=0.0, value=None, step=0.01,
-                format="%.2f", placeholder="Escribe el importe", key="importe_voucher",
+                format="%.2f", placeholder="Escribe el importe", key="importe_voucher", disabled=cerrada,
             )
         with col3:
             folio = st.text_input(
-                "Folio o referencia (opcional)",
+                "Folio o referencia (opcional)", disabled=cerrada,
                 help="Puedes repetir una referencia con otro importe o medio de pago. "
                      "Si usas una tarjeta como referencia, captura sólo sus últimos cuatro dígitos.",
             )
         guardar = st.form_submit_button("Agregar movimiento", type="primary", disabled=cerrada)
 
-    if guardar:
+    if guardar and not cerrada:
         if importe is None or importe <= 0:
             st.error("Escribe un importe mayor a cero.")
         elif folio.strip() and any(
@@ -639,7 +1063,7 @@ def mostrar_arqueo_caja(repositorio=None):
                 format_func=etiquetas.get,
                 index=None,
                 placeholder="Selecciona el movimiento por tipo de pago, importe y folio",
-                key="movimiento_a_eliminar",
+                key="movimiento_a_eliminar", disabled=cerrada,
             )
             if st.button("Eliminar movimiento", disabled=movimiento_id is None or cerrada):
                 estado["vouchers"] = [
@@ -660,7 +1084,7 @@ def mostrar_arqueo_caja(repositorio=None):
         "Pega aquí el Corte Z completo",
         height=220,
         placeholder="Copia el contenido del reporte en el ERP y pégalo aquí.",
-        key="texto_corte_z",
+        key="texto_corte_z", disabled=cerrada,
     )
 
     if st.button("Analizar Corte Z", type="primary", disabled=cerrada):
@@ -754,7 +1178,7 @@ def mostrar_arqueo_caja(repositorio=None):
                 disabled=cerrada,
             )
             if observacion_automatica:
-                st.caption("Esta incidencia se agregará automáticamente a las observaciones del cierre.")
+                st.caption("La incidencia queda registrada en el arqueo; las observaciones del formato son manuales.")
                 st.info(observacion_automatica)
         else:
             st.error(
@@ -765,7 +1189,7 @@ def mostrar_arqueo_caja(repositorio=None):
         confirmar_fecha = True
         if fecha_corte and fecha_corte != fecha_trabajo:
             confirmar_fecha = st.checkbox(
-                "Confirmo que este Corte Z pertenece a la fecha de trabajo seleccionada."
+                "Confirmo que este Corte Z pertenece a la fecha de trabajo seleccionada.", disabled=cerrada
             )
 
         arqueo_aceptable = total_cuadra and (medios_cuadran or aceptar_diferencias)
@@ -788,7 +1212,6 @@ def mostrar_arqueo_caja(repositorio=None):
             })
             if aceptar_diferencias and observacion_automatica:
                 estado["observacion_automatica"] = observacion_automatica
-                st.session_state.pop("cierre_observaciones", None)
             elif medios_cuadran:
                 estado.pop("observacion_automatica", None)
             estado["ultimo_corte"] = None
@@ -828,7 +1251,7 @@ def mostrar_arqueo_caja(repositorio=None):
         "Pega aquí el Corte X completo",
         height=220,
         placeholder="Este reporte se pega una sola vez al finalizar el día.",
-        key="texto_corte_x",
+        key="texto_corte_x", disabled=cerrada,
     )
     if st.button("Analizar Corte X", disabled=not ultimo_arqueo_cuadrado or cerrada):
         try:
@@ -845,12 +1268,10 @@ def mostrar_arqueo_caja(repositorio=None):
     corte_x = estado.get("corte_x")
     if corte_x:
         datos_guardados = estado.get("cierre_datos", {})
-        observacion_automatica = str(estado.get("observacion_automatica", "")).strip()
         observaciones_guardadas = str(datos_guardados.get("observaciones", "")).strip()
-        observaciones_iniciales = observaciones_guardadas or observacion_automatica
         st.session_state.setdefault("cierre_piezas", datos_guardados.get("piezas", 0))
         st.session_state.setdefault("cierre_tickets", datos_guardados.get("tickets", int(corte_x["tickets_efectivos"])))
-        st.session_state.setdefault("cierre_observaciones", observaciones_iniciales)
+        st.session_state.setdefault("cierre_observaciones", observaciones_guardadas)
         st.markdown("##### Información detectada")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Venta con IVA", f"${corte_x['venta']:,.2f}")
@@ -891,17 +1312,13 @@ def mostrar_arqueo_caja(repositorio=None):
             "Observaciones para el formato de corte (opcional)",
             key="cierre_observaciones",
             disabled=cerrada,
-            help=(
-                "Si hubo diferencias de clasificación entre medios de pago y fueron "
-                "confirmadas contra vouchers físicos, Sinapsis agrega aquí una observación "
-                "automática. Puedes conservarla y añadir comentarios adicionales."
-            ),
+            help="Escribe aquí, con tus propias palabras, cualquier aclaración que deba aparecer en el formato.",
         )
         confirmar_fecha_x = True
         if fecha_x_distinta:
             confirmar_fecha_x = st.checkbox(
                 "Confirmo que este Corte X pertenece a la fecha de trabajo seleccionada.",
-                key="confirmar_fecha_corte_x",
+                key="confirmar_fecha_corte_x", disabled=cerrada,
             )
 
         if st.button(
@@ -915,6 +1332,12 @@ def mostrar_arqueo_caja(repositorio=None):
                     usuario_info.get("nombre_completo")
                     or st.session_state.get("usuario_actual", "")
                 )
+                maestro_drive = _obtener_base_corte_drive()
+                maestro_estadillo = cargar_maestro_estadillo(fecha_trabajo) if cargar_maestro_estadillo else None
+                if maestro_drive:
+                    st.caption(
+                        "Corte de caja generado sobre la última versión mensual disponible en Google Drive."
+                    )
                 estado["documentos_cierre"] = {
                     "corte": generar_formato_corte(
                         fecha_trabajo,
@@ -922,17 +1345,21 @@ def mostrar_arqueo_caja(repositorio=None):
                         estado["vouchers"],
                         responsable,
                         observaciones,
+                        plantilla_bytes=(maestro_drive or {}).get("contenido"),
+                        facturacion=estado.get("cierre_datos", {}).get("facturacion", {}),
                     ),
                     "estadillo": generar_estadillo(
                         fecha_trabajo,
                         corte_x,
                         piezas,
                         tickets,
+                        plantilla_bytes=(maestro_estadillo or {}).get("contenido"),
                     ),
                 }
                 estado["cierre_datos"] = {
                     "piezas": int(piezas), "tickets": int(tickets), "observaciones": observaciones,
                     "responsable": responsable, "fecha_confirmada": confirmar_fecha_x,
+                    "facturacion": estado.get("cierre_datos", {}).get("facturacion", {}),
                     "huella": huella_movimientos(estado["vouchers"]),
                 }
                 if _guardar_cambio(estado, repositorio, "preparar_documentos"):
@@ -944,16 +1371,188 @@ def mostrar_arqueo_caja(repositorio=None):
     if estado.get("cierre_datos") and not estado.get("documentos_cierre"):
         datos = estado["cierre_datos"]
         try:
+            maestro_drive = _obtener_base_corte_drive()
+            maestro_estadillo = cargar_maestro_estadillo(fecha_trabajo) if cargar_maestro_estadillo else None
+            if cerrada and not maestro_drive:
+                raise ValueError("No se encontró el Corte mensual cerrado en Google Drive.")
             estado["documentos_cierre"] = {
-                "corte": generar_formato_corte(fecha_trabajo, estado["corte_x"], estado["vouchers"], datos["responsable"], datos["observaciones"]),
-                "estadillo": generar_estadillo(fecha_trabajo, estado["corte_x"], datos["piezas"], datos["tickets"]),
+                "corte": maestro_drive["contenido"] if cerrada else generar_formato_corte(
+                    fecha_trabajo, estado["corte_x"], estado["vouchers"],
+                    datos["responsable"], datos["observaciones"],
+                    plantilla_bytes=(maestro_drive or {}).get("contenido"),
+                    facturacion=datos.get("facturacion", {}),
+                ),
+                "estadillo": (maestro_estadillo or {}).get("contenido") if cerrada else generar_estadillo(
+                    fecha_trabajo, estado["corte_x"], datos["piezas"], datos["tickets"],
+                    plantilla_bytes=(maestro_estadillo or {}).get("contenido"),
+                ),
             }
             st.session_state.arqueo_caja["documentos_cierre"] = estado["documentos_cierre"]
-        except Exception:
-            st.error("La jornada está guardada, pero no se pudieron reconstruir sus documentos. Revisa las plantillas privadas.")
+        except Exception as ex:
+            st.error(f"La jornada está guardada, pero no se pudieron cargar sus documentos: {ex}")
 
     documentos = estado.get("documentos_cierre")
     if documentos:
+        datos_drive = estado.get("documentos_drive", {})
+        if datos_drive.get("guardado"):
+            st.success(
+                "Cierre archivado en Google Drive: "
+                f"{datos_drive.get('ruta', 'CORTES DE CAJA')}"
+            )
+        datos_cierre = estado.get("cierre_datos", {})
+        try:
+            facturacion_documento = leer_facturacion_formato_corte(
+                documentos["corte"], fecha_trabajo, estado.get("corte_x")
+            )
+        except Exception as ex:
+            st.error(f"No se pudo leer la facturación existente: {ex}")
+            st.stop()
+
+        facturacion_guardada = datos_cierre.get("facturacion") or {}
+        if facturacion_guardada and not cerrada:
+            try:
+                facturacion_preview = normalizar_facturacion(
+                    facturacion_guardada, estado["corte_x"]
+                )
+            except ValueError:
+                facturacion_preview = facturacion_documento
+        else:
+            facturacion_preview = facturacion_documento
+
+        _mostrar_preview_corte(
+            fecha_trabajo,
+            estado["corte_x"],
+            estado["vouchers"],
+            datos_cierre,
+            facturacion_preview,
+        )
+
+        st.divider()
+        st.subheader("Facturación del Corte de Caja")
+        if cerrada:
+            st.caption(
+                "El arqueo está cerrado, pero esta sección permanece habilitada para completar "
+                "las facturas posteriores. El Estadillo no se modifica."
+            )
+        else:
+            st.caption(
+                "Esta captura es opcional durante el cierre nocturno. Si las facturas todavía no "
+                "existen, puedes dejarla vacía y completarla al día siguiente."
+            )
+
+        editor_base = _dataframe_facturas_clientes(facturacion_preview)
+        with st.form(f"form_facturacion_{fecha_trabajo.isoformat()}"):
+            st.markdown("##### Facturas de clientes")
+            st.caption(
+                "Puedes capturar hasta 11 facturas de clientes. "
+                "El importe puede ser negativo cuando corresponda a una nota de crédito."
+            )
+            tabla_facturas = st.data_editor(
+                editor_base,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                key=f"editor_facturas_clientes_{fecha_trabajo.isoformat()}",
+                column_config={
+                    "Ticket": st.column_config.NumberColumn("Ticket", step=1, format="%d"),
+                    "Folio factura": st.column_config.TextColumn("Folio factura"),
+                    "Importe": st.column_config.NumberColumn("Importe", step=0.01, format="$ %.2f"),
+                },
+            )
+            st.markdown("##### Factura de público general")
+            folio_global = st.text_input(
+                "Folio de factura global",
+                value=_texto_limpio(facturacion_preview.get("folio_global")),
+                help="Sinapsis calcula automáticamente los rangos restantes de público general.",
+                key=f"folio_global_{fecha_trabajo.isoformat()}",
+            )
+            aplicar_facturacion = st.form_submit_button(
+                "Aplicar facturación y actualizar vista previa",
+                type="primary",
+            )
+
+        if aplicar_facturacion:
+            try:
+                captura = _facturacion_desde_editor(tabla_facturas, folio_global)
+                normalizada = normalizar_facturacion(captura, estado["corte_x"])
+                nuevo_corte = actualizar_facturacion_corte(
+                    documentos["corte"], fecha_trabajo, estado["corte_x"], normalizada,
+                )
+                estado["documentos_cierre"]["corte"] = nuevo_corte
+                estado.setdefault("cierre_datos", {})["facturacion"] = normalizada
+
+                if cerrada:
+                    estado["facturacion_pendiente_drive"] = True
+                    st.session_state.arqueo_caja = estado
+                    st.success(
+                        "Facturación aplicada a la vista previa. Revisa los datos y, cuando estén correctos, "
+                        "guarda el Corte actualizado en Google Drive."
+                    )
+                    st.rerun()
+                else:
+                    if _guardar_cambio(estado, repositorio, "actualizar_facturacion"):
+                        st.rerun()
+                    st.stop()
+            except ValueError as ex:
+                st.error(str(ex))
+            except Exception as ex:
+                st.error(f"No pude aplicar la facturación al Corte de Caja: {ex}")
+
+        try:
+            propuesta = normalizar_facturacion(
+                _facturacion_desde_editor(tabla_facturas, folio_global),
+                estado["corte_x"],
+            )
+            if propuesta.get("rangos_publico"):
+                st.caption(
+                    "Rangos calculados para público general: "
+                    + ", ".join(propuesta["rangos_publico"])
+                )
+            if propuesta.get("rangos_publico") and not propuesta.get("folio_global"):
+                st.info(
+                    "La factura global todavía está pendiente. Los rangos se muestran como referencia, "
+                    "pero no se escribirán en el Corte hasta capturar el folio global."
+                )
+        except ValueError:
+            pass
+
+        if cerrada:
+            if estado.get("facturacion_pendiente_drive"):
+                st.warning("La vista previa tiene cambios de facturación pendientes de guardar en Drive.")
+            if guardar_corte_drive is None or cargar_maestro_corte is None:
+                st.error("Falta conectar la carga y actualización del Corte en Google Drive.")
+            elif st.button("Guardar Corte actualizado en Google Drive", type="primary"):
+                try:
+                    # Take the submitted form values as well, so no edits are silently omitted.
+                    captura = normalizar_facturacion(
+                        _facturacion_desde_editor(tabla_facturas, folio_global), estado["corte_x"],
+                    )
+                    aplicada = normalizar_facturacion(facturacion_preview, estado["corte_x"])
+                    if captura != aplicada:
+                        raise ValueError("Aplica primero la facturación y revisa la vista previa antes de guardarla.")
+                    maestro = _obtener_base_corte_drive()
+                    if not maestro:
+                        raise ValueError("No se encontró el maestro mensual. No se creará otro archivo.")
+                    nuevo_corte = actualizar_facturacion_corte(
+                        maestro["contenido"], fecha_trabajo, estado["corte_x"], aplicada,
+                    )
+                    resultado_drive = guardar_corte_drive(fecha_trabajo, nuevo_corte)
+                    estado["documentos_cierre"]["corte"] = nuevo_corte
+                    estado.setdefault("cierre_datos", {})["facturacion"] = aplicada
+                    estado["facturacion_pendiente_drive"] = False
+                    estado["documentos_drive"] = {
+                        **estado.get("documentos_drive", {}),
+                        "ruta": resultado_drive.get("ruta", ""),
+                        "nombre_corte": resultado_drive.get("nombre_corte", ""),
+                        "guardado": True,
+                        "actualizacion_facturacion": True,
+                    }
+                    st.session_state.arqueo_caja = estado
+                    st.success("Corte de Caja actualizado en Google Drive. El Estadillo no fue modificado.")
+                except Exception as ex:
+                    st.error(f"No se pudo actualizar el Corte de Caja en Google Drive: {ex}")
+
+        st.divider()
         fecha_archivo = fecha_trabajo.strftime("%Y-%m-%d")
         col_descarga1, col_descarga2 = st.columns(2)
         with col_descarga1:
@@ -967,12 +1566,14 @@ def mostrar_arqueo_caja(repositorio=None):
         with col_descarga2:
             st.download_button(
                 "Descargar Estadillo",
-                data=documentos["estadillo"],
+                data=documentos.get("estadillo") or b"",
+                disabled=not documentos.get("estadillo"),
                 file_name=f"Estadillo_actualizado_{fecha_archivo}.xlsm",
                 mime="application/vnd.ms-excel.sheet.macroEnabled.12",
                 use_container_width=True,
             )
-        st.warning("Estos archivos son borradores para revisión. Sinapsis todavía no envía correos.")
+        if not cerrada:
+            st.warning("Estos archivos son borradores para revisión. Sinapsis todavía no envía correos.")
         if repositorio is not None and not cerrada:
             st.caption("El cierre definitivo guarda esta jornada y bloquea nuevas capturas y eliminaciones.")
             datos = estado.get("cierre_datos", {})
@@ -982,6 +1583,21 @@ def mostrar_arqueo_caja(repositorio=None):
             if not total_coincide:
                 st.error("La venta del Corte X no coincide con los movimientos. Corrige la diferencia antes del cierre definitivo.")
             if st.button("Confirmar cierre definitivo", disabled=not listo):
+                if guardar_documentos_drive is not None:
+                    try:
+                        resultado_drive = guardar_documentos_drive(fecha_trabajo, documentos)
+                        estado["documentos_drive"] = {
+                            "ruta": resultado_drive.get("ruta", ""),
+                            "nombre_corte": resultado_drive.get("nombre_corte", ""),
+                            "nombre_estadillo": resultado_drive.get("nombre_estadillo", ""),
+                            "guardado": True,
+                        }
+                    except Exception as ex:
+                        st.error(
+                            "No se pudo guardar el cierre en Google Drive. "
+                            f"La jornada no se cerró para evitar perder el archivo mensual. Detalle: {ex}"
+                        )
+                        st.stop()
                 if _guardar_cambio(estado, repositorio, "cerrar", cerrar=True):
                     st.rerun()
                 st.stop()
