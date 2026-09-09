@@ -640,7 +640,7 @@ def generar_formato_corte(
     limpiar = [
         "G3", "C5",
         "E11", "E17", "E22", "E23", "E25", "E26",
-        "E29", "E30", "E35", "E36", "E38", "E41", "E42", "E44",
+        "E29", "E30", "E32", "E35", "E36", "E38", "E41", "E42", "E44",
         "C53",
         *[f"C{fila}" for fila in range(58, 69)],
         *[f"E{fila}" for fila in range(58, 69)],
