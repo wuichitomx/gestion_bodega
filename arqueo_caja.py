@@ -1494,7 +1494,7 @@ def mostrar_arqueo_caja(
                     )
                     st.rerun()
                 else:
-                    if _guardar_cambio(estado, repositorio, "actualizar_facturacion"):
+                    if _guardar_cambio(estado, repositorio, "preparar_documentos"):
                         st.rerun()
                     st.stop()
             except ValueError as ex:
