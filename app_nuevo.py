@@ -30,6 +30,56 @@ from cajas_persistencia import RepositorioCajas, clave_de_servidor
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 
+GOOGLE_GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
+
+
+def configuracion_correo_gmail_pendiente():
+    """Comprueba presencia de configuración, sin mostrar valores ni autenticar."""
+    configuracion = st.secrets.get("gmail", {})
+    faltantes = [campo for campo in ("client_id", "client_secret", "refresh_token")
+                 if not str(configuracion.get(campo, "")).strip()]
+    if faltantes:
+        return ("Configuración Gmail pendiente: faltan " + ", ".join(faltantes)
+                + " en la sección privada [gmail]. Habilita Gmail API y autoriza la cuenta "
+                  "que tendrá los borradores mediante OAuth con el permiso gmail.compose. "
+                  "La cuenta de servicio de Drive no sustituye esta autorización. "
+                  "No compartas aquí los valores privados.")
+    return ""
+
+
+def crear_borrador_gmail(contenido_eml, borrador_id=None):
+    """Frontera Gmail: OAuth de usuario separado de Drive; nunca llama a send.
+
+    Configuración privada [gmail]: client_id, client_secret y refresh_token
+    obtenido por consentimiento OAuth de la cuenta propietaria del borrador,
+    con acceso offline y alcance GOOGLE_GMAIL_SCOPE. No usa service_account.
+    La gestión interactiva del consentimiento se realiza fuera de esta app.
+    """
+    from google.oauth2.credentials import Credentials
+
+    pendiente = configuracion_correo_gmail_pendiente()
+    if pendiente:
+        raise ValueError(pendiente)
+    if not contenido_eml:
+        raise ValueError("No hay un correo validado para preparar.")
+    configuracion = st.secrets["gmail"]
+    credenciales = Credentials(
+        token=None, refresh_token=configuracion["refresh_token"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=configuracion["client_id"], client_secret=configuracion["client_secret"],
+        scopes=[GOOGLE_GMAIL_SCOPE],
+    )
+    servicio = build("gmail", "v1", credentials=credenciales, cache_discovery=False)
+    cuerpo = {"message": {"raw": base64.urlsafe_b64encode(contenido_eml).decode("ascii")}}
+    borradores = servicio.users().drafts()
+    if borrador_id:
+        solicitud = borradores.update(userId="me", id=borrador_id, body=cuerpo)
+    else:
+        solicitud = borradores.create(userId="me", body=cuerpo)
+    # No reintentar automáticamente una creación cuya respuesta podría haberse perdido.
+    return solicitud.execute(num_retries=0)
+
+
 class ArchivoExcelDrive(io.BytesIO):
     """Archivo en memoria compatible con pandas y los cargadores existentes."""
 
@@ -1728,6 +1778,8 @@ if pagina_actual == "💵 Arqueo de caja":
         guardar_documentos_drive=guardar_documentos_caja_drive,
         guardar_corte_drive=guardar_corte_caja_drive,
         cargar_maestro_estadillo=cargar_maestro_estadillo_drive,
+        crear_borrador_correo=crear_borrador_gmail,
+        configuracion_gmail=configuracion_correo_gmail_pendiente,
     )
 
 # ------------------------------------------

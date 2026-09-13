@@ -912,12 +912,181 @@ def _mostrar_preview_corte(fecha_trabajo, corte_x, vouchers, cierre_datos, factu
     if observaciones:
         st.caption(f"Observaciones: {observaciones}")
 
+CORREO_PARA = "cortesadidas.djose@gmail.com"
+CORREO_CC = "corporativofashion23@gmail.com"
+CORREO_CUERPO = "Hola, comparto archivos venta del día de hoy."
+
+
+def validar_documentos_correo(estado, fecha_trabajo, documentos):
+    """Valida los bytes que se adjuntarán, sin modificar libros ni la jornada."""
+    errores = []
+    if estado.get("fecha") != fecha_trabajo.isoformat() or not estado.get("_cerrada"):
+        errores.append("La fecha seleccionada debe tener una jornada cerrada.")
+    if estado.get("facturacion_pendiente_drive"):
+        errores.append("Guarda primero el Corte con la facturación actualizada en Drive.")
+    corte_x = estado.get("corte_x") or {}
+    corte = documentos.get("corte")
+    estadillo = documentos.get("estadillo")
+    if not corte:
+        errores.append("Falta el Corte de Caja actualizado.")
+    else:
+        try:
+            valores = leer_celdas_ooxml(corte, f"{fecha_trabajo.day:02d}", ["G3", "C5", "C53"])
+            if valores["G3"] != fecha_trabajo.strftime("%d/%m/%Y"):
+                raise ValueError("El Corte no corresponde a la fecha seleccionada.")
+            if abs(float(valores["C5"]) - float(corte_x["venta"])) >= 0.01:
+                raise ValueError("La venta del Corte no coincide con la jornada.")
+            if str(valores["C53"]) != f"{corte_x['consecutivo_inicial']}-{corte_x['consecutivo_final']}":
+                raise ValueError("Los tickets del Corte no coinciden con la jornada.")
+            leida = leer_facturacion_formato_corte(corte, fecha_trabajo)
+            aplicada = normalizar_facturacion(leida, corte_x, exigir_global=True)
+            if leida["rangos_publico"] != (aplicada["rangos_publico"] if aplicada["folio_global"] else []):
+                raise ValueError("Los rangos de facturación no están aplicados en el Corte.")
+            # La copia en sesión representa la última facturación aplicada por este usuario.
+            local = (estado.get("documentos_cierre") or {}).get("corte")
+            if local:
+                esperada = normalizar_facturacion(
+                    leer_facturacion_formato_corte(local, fecha_trabajo), corte_x, exigir_global=True,
+                )
+                if aplicada != esperada:
+                    raise ValueError("La facturación en Drive cambió. Recarga la jornada y revísala.")
+        except Exception as ex:
+            errores.append(f"Corte / facturación: {ex}")
+    if not estadillo:
+        errores.append("Falta el Estadillo.")
+    else:
+        try:
+            fila = 14 + fecha_trabajo.day
+            valores = leer_celdas_ooxml(estadillo, MESES_ESTADILLO[fecha_trabajo.month],
+                                      [f"K{fila}", f"M{fila}", f"N{fila}"])
+            cierre = estado.get("cierre_datos") or {}
+            for celda, esperado in ((f"K{fila}", corte_x["venta_neta"]),
+                                    (f"M{fila}", cierre["piezas"]), (f"N{fila}", cierre["tickets"])):
+                if valores[celda] is None or abs(float(valores[celda]) - float(esperado)) >= 0.01:
+                    raise ValueError("El Estadillo no contiene los datos cerrados del día seleccionado.")
+        except Exception as ex:
+            errores.append(f"Estadillo: {ex}")
+    return errores
+
+
+def construir_correo_informacion(fecha_trabajo, adjuntos):
+    """Serializa el correo y sus adjuntos; nunca envía ni conecta con Gmail."""
+    from email.message import EmailMessage
+    from email.policy import SMTP
+    import mimetypes
+
+    mensaje = EmailMessage(policy=SMTP)
+    mensaje["To"] = CORREO_PARA
+    mensaje["Cc"] = CORREO_CC
+    mensaje["Subject"] = f"Venta {fecha_trabajo:%d-%m-%Y}"
+    mensaje["X-Unsent"] = "1"
+    mensaje.set_content(CORREO_CUERPO)
+    for nombre, contenido in adjuntos:
+        nombre = str(nombre).replace("\\", "/").rsplit("/", 1)[-1]
+        nombre = nombre.replace("\r", "").replace("\n", "") or "adjunto"
+        if not contenido:
+            raise ValueError(f"El archivo {nombre} está vacío.")
+        tipo = mimetypes.guess_type(nombre)[0] or "application/octet-stream"
+        principal, subtipo = tipo.split("/", 1)
+        mensaje.add_attachment(contenido, maintype=principal, subtype=subtipo, filename=nombre)
+    return mensaje.as_bytes()
+
+
+def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_estadillo,
+                               crear_borrador, configuracion_gmail):
+    import hashlib
+
+    st.divider()
+    st.subheader("Correo de información")
+    st.caption("Un solo correo con la documentación completa de la fecha seleccionada. "
+               "Esta sección sigue disponible después del cierre; no desbloquea la jornada.")
+    usuario = str(st.session_state.get("usuario_actual", ""))
+    clave = "correo_" + hashlib.sha256(usuario.encode()).hexdigest()[:16] + "_" + fecha_trabajo.isoformat()
+    erp = st.file_uploader("Reporte de ventas ERP", type=["xlsx", "xls", "xlsm", "csv", "pdf"],
+                           key=clave + "_erp")
+    terminales = st.file_uploader("Cierres de terminales bancarias", type=["jpg", "jpeg", "png", "pdf"],
+                                  accept_multiple_files=True, key=clave + "_terminales")
+    st.caption("Las cargas son temporales y pertenecen a esta fecha y usuario. "
+               "Si sales de la sesión o cambias de fecha, puede ser necesario cargarlas nuevamente.")
+    documentos = {}
+    errores = []
+    # Lectura fresca: no adjuntar un maestro mensual/anual obsoleto de la sesión.
+    for tipo, callback in (("corte", cargar_corte), ("estadillo", cargar_estadillo)):
+        if estado.get("_cerrada") and callback:
+            try:
+                maestro = callback(fecha_trabajo)
+                documentos[tipo] = (maestro or {}).get("contenido")
+            except Exception:
+                errores.append(f"No se pudo consultar {tipo} en Drive. Revisa la conexión y vuelve a intentar.")
+    errores.extend(validar_documentos_correo(estado, fecha_trabajo, documentos))
+    externos = []
+    for etiqueta, archivos in (("Reporte ERP", [erp] if erp else []), ("Terminales", terminales or [])):
+        if not archivos:
+            errores.append(f"Falta cargar: {etiqueta}.")
+        for archivo in archivos:
+            contenido = archivo.getvalue()
+            if not contenido:
+                errores.append(f"Archivo vacío: {archivo.name}.")
+            externos.append((archivo.name, contenido))
+    for etiqueta, listo in (("Corte de Caja", bool(documentos.get("corte"))),
+                            ("Estadillo", bool(documentos.get("estadillo"))),
+                            ("Reporte ERP", bool(erp and erp.size)),
+                            ("Terminales", bool(terminales) and all(a.size for a in terminales))):
+        st.write(f"{'✅ Disponible' if listo else '❌ Faltante'} — {etiqueta}")
+    for error in errores:
+        st.warning(error)
+    if not errores:
+        st.success("Documentación y facturación aplicada verificadas para esta jornada.")
+    st.markdown("##### Vista previa del correo")
+    st.text(f"Para: {CORREO_PARA}\nCC: {CORREO_CC}\nAsunto: Venta {fecha_trabajo:%d-%m-%Y}\n\n{CORREO_CUERPO}")
+    adjuntos = [(f"Corte_de_Caja_{fecha_trabajo:%Y-%m-%d}.xlsx", documentos.get("corte")),
+                (f"Estadillo_{fecha_trabajo:%Y-%m-%d}.xlsm", documentos.get("estadillo"))] + externos
+    for nombre, contenido in adjuntos:
+        st.text(f"{nombre} — {len(contenido or b'') / 1024:.1f} KB")
+    eml = None
+    if not errores:
+        eml = construir_correo_informacion(fecha_trabajo, adjuntos)
+        if len(eml) > 25 * 1024 * 1024:
+            errores.append("El correo supera el límite preventivo de 25 MB. Reduce el tamaño de los archivos.")
+            st.warning(errores[-1])
+            eml = None
+    pendiente = configuracion_gmail() if configuracion_gmail else "Falta conectar la autenticación Gmail."
+    if pendiente:
+        st.info(pendiente)
+    huella = hashlib.sha256(b"".join(hashlib.sha256((n.encode() + (c or b''))).digest()
+                                    for n, c in adjuntos)).hexdigest()
+    anterior = st.session_state.get(clave + "_draft") or {}
+    ya_preparado = anterior.get("huella") == huella and anterior.get("id")
+    if st.button("Preparar correo de información", key=clave + "_preparar",
+                 disabled=bool(errores or pendiente or not crear_borrador or ya_preparado)):
+        try:
+            resultado = crear_borrador(eml, borrador_id=anterior.get("id"))
+            if not resultado or not resultado.get("id"):
+                raise ValueError("Gmail no confirmó el borrador.")
+            st.session_state[clave + "_draft"] = {"id": resultado["id"], "huella": huella}
+            st.success("Borrador preparado en Gmail. Revísalo allí antes de enviarlo.")
+        except Exception:
+            st.error("No se pudo confirmar el borrador. Revisa Gmail antes de reintentar para evitar duplicados; "
+                     "comprueba también la autorización de la cuenta. No se envió ningún correo desde esta función.")
+    if ya_preparado:
+        st.success("Esta versión ya tiene un borrador preparado en Gmail durante esta sesión.")
+    st.caption("Al cambiar adjuntos se actualiza el mismo borrador durante esta sesión. "
+               "Después de reiniciar la sesión, revisa Gmail antes de preparar otro.")
+    if st.checkbox("Habilitar respaldo opcional .eml", key=clave + "_respaldo"):
+        st.info("El .eml es una descarga local: no crea un borrador en Gmail ni envía el correo.")
+        st.download_button("Descargar correo .eml", data=eml or b"", disabled=not eml,
+                           file_name=f"Venta_{fecha_trabajo:%d-%m-%Y}.eml", mime="message/rfc822",
+                           key=clave + "_descargar")
+
+
 def mostrar_arqueo_caja(
     repositorio=None,
     cargar_maestro_corte=None,
     guardar_documentos_drive=None,
     guardar_corte_drive=None,
     cargar_maestro_estadillo=None,
+    crear_borrador_correo=None,
+    configuracion_gmail=None,
 ):
     estado = _estado_inicial()
 
@@ -1410,6 +1579,10 @@ def mostrar_arqueo_caja(
             )
         except Exception as ex:
             st.error(f"No se pudo leer la facturación existente: {ex}")
+            _mostrar_correo_informacion(
+                estado, fecha_trabajo, cargar_maestro_corte, cargar_maestro_estadillo,
+                crear_borrador_correo, configuracion_gmail,
+            )
             st.stop()
 
         facturacion_guardada = datos_cierre.get("facturacion") or {}
@@ -1605,3 +1778,8 @@ def mostrar_arqueo_caja(
                 if _guardar_cambio(estado, repositorio, "cerrar", cerrar=True):
                     st.rerun()
                 st.stop()
+
+    _mostrar_correo_informacion(
+        estado, fecha_trabajo, cargar_maestro_corte, cargar_maestro_estadillo,
+        crear_borrador_correo, configuracion_gmail,
+    )
