@@ -25,6 +25,7 @@ import arqueo_caja
 importlib.reload(arqueo_caja)
 mostrar_arqueo_caja = arqueo_caja.mostrar_arqueo_caja
 from cajas_persistencia import RepositorioCajas, clave_de_servidor
+from permisos import PERMISOS, PUESTOS, OPERATIVOS, permisos_usuario, tiene_permiso, puesto_usuario
 
 
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
@@ -1400,7 +1401,7 @@ if not st.session_state.autenticado:
                     st.session_state.usuario_info = usuario_info
                     
                     rol = usuario_info.get("rol", "").lower() if "rol" in usuario_info else ""
-                    if rol == "admin" or "admin" in u.strip().lower():
+                    if rol == "admin":
                         st.session_state.es_admin = True
                     else:
                         st.session_state.es_admin = False
@@ -1413,6 +1414,20 @@ if not st.session_state.autenticado:
 # ==========================================
 # MENÚ LATERAL
 # ==========================================
+# Refrescar autorizaciones en cada interacción, sin conservar revocaciones en sesión.
+try:
+    perfiles = supabase.table("usuarios").select("*").eq(
+        "username", st.session_state.usuario_actual).limit(1).execute().data
+except Exception:
+    st.error("No se pudieron verificar tus permisos. Vuelve a intentar.")
+    st.stop()
+if not perfiles:
+    st.session_state.autenticado = False
+    st.rerun()
+st.session_state.usuario_info = perfiles[0]
+st.session_state.es_admin = str(perfiles[0].get("rol") or "").strip().lower() == "admin"
+permisos_actuales = permisos_usuario(perfiles[0])
+
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
@@ -1735,6 +1750,13 @@ paginas_admin = {
     ],
 }
 
+paginas_admin = {
+    seccion: [p for p in paginas if
+              (p != "👥 Gestión Usuarios" or "administrar_usuarios" in permisos_actuales) and
+              (p != "💵 Arqueo de caja" or bool(permisos_actuales & OPERATIVOS))]
+    for seccion, paginas in paginas_admin.items()
+}
+paginas_admin = {s: p for s, p in paginas_admin.items() if p}
 with st.sidebar:
     st.markdown("#### 🧭 Menú principal")
     if st.session_state.es_admin:
@@ -1751,8 +1773,10 @@ with st.sidebar:
     else:
         rol_actual = str(st.session_state.usuario_info.get("rol", "")).strip().lower()
         opciones_usuario = ["📊 Dashboard", "🔍 Búsqueda Manual"]
-        if rol_actual == "cajero":
+        if permisos_actuales & OPERATIVOS:
             opciones_usuario.insert(0, "💵 Arqueo de caja")
+        if "administrar_usuarios" in permisos_actuales:
+            opciones_usuario.append("👥 Gestión Usuarios")
         pagina_actual = st.radio(
             "Pantalla",
             options=opciones_usuario,
@@ -1760,6 +1784,12 @@ with st.sidebar:
         )
 
 if pagina_actual == "💵 Arqueo de caja":
+    if not permisos_actuales & OPERATIVOS:
+        st.error("No tienes permiso para acceder a Caja.")
+        st.stop()
+    if "permisos" not in st.session_state.usuario_info:
+        st.error("Antes de usar esta versión de Caja, instala la nueva migración 002_puestos_permisos_responsables.sql.")
+        st.stop()
     repositorio_cajas = None
     if st.secrets.get("CAJAS_PERSISTENCIA", False):
         clave_cajas = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -1768,7 +1798,7 @@ if pagina_actual == "💵 Arqueo de caja":
             st.stop()
         try:
             cliente_cajas = create_client(st.secrets["SUPABASE_URL"], clave_cajas)
-            repositorio_cajas = RepositorioCajas(cliente_cajas, st.session_state.usuario_actual)
+            repositorio_cajas = RepositorioCajas(cliente_cajas, st.session_state.usuario_actual, st.session_state.usuario_info)
         except Exception:
             st.error("No se pudo configurar el guardado de Cajas. Revisa la configuración privada.")
             st.stop()
@@ -3189,19 +3219,23 @@ if pagina_actual == "🎯 Metas por asesor":
 # 10. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
 # ------------------------------------------
 if pagina_actual == "👥 Gestión Usuarios":
-    if st.session_state.es_admin:
+    if "administrar_usuarios" in permisos_actuales:
         st.subheader("👥 Agregar Usuario")
         with st.form("nuevo_u"):
             col_u1, col_u2, col_u3 = st.columns(3)
             with col_u1:
                 u_n = st.text_input("Usuario")
             with col_u2:
-                p_n = st.text_input("Contraseña")
+                p_n = st.text_input("Contraseña", type="password")
             with col_u3:
                 rol_n = st.selectbox(
                     "Perfil",
                     options=["asesor", "cajero", "admin"],
                 )
+            nombre_n = st.text_input("Nombre completo")
+            puesto_n = st.selectbox("Puesto", PUESTOS, index=3)
+            permisos_n = st.multiselect("Permisos", list(PERMISOS), format_func=PERMISOS.get)
+            st.caption("El perfil admin conserva acceso a los módulos administrativos anteriores; Caja y usuarios se autorizan con los permisos elegidos.")
             if st.form_submit_button("Agregar Usuario"):
                 if u_n and p_n:
                     try:
@@ -3210,13 +3244,15 @@ if pagina_actual == "👥 Gestión Usuarios":
                             "password": p_n.strip(), 
                             "rol": rol_n,
                             "codigo_erp": u_n.strip(),
-                            "nombre_completo": "",
+                            "nombre_completo": nombre_n.strip(),
+                            "puesto": puesto_n,
+                            "permisos": permisos_n,
                             "meta_mensual": 0.0
                         }).execute()
                         st.success(f"Usuario {u_n.strip()} agregado correctamente.")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error al crear usuario: {e}")
+                        st.error("No se pudo crear el usuario. Verifica sus datos y que esté instalada la nueva migración de permisos.")
                 else:
                     st.warning("Debes llenar el usuario y la contraseña.")
                     
@@ -3244,32 +3280,40 @@ if pagina_actual == "👥 Gestión Usuarios":
             st.info("No hay usuarios adicionales registrados.")
 
         st.markdown("---")
-        st.subheader("🔑 Gestionar Contraseñas y Permisos")
-        st.info("Visualiza y edita las contraseñas o el rol de acceso directamente en esta tabla. No olvides dar clic en 'Guardar Cambios de Usuarios'.")
-        
-        res_u_list = supabase.table("usuarios").select("username, password, rol").execute().data
-        if res_u_list:
-            df_u_pass = pd.DataFrame(res_u_list)
-            
-            edited_pass_df = st.data_editor(
-                df_u_pass,
-                column_config={
-                    "username": st.column_config.TextColumn("Usuario App", disabled=True),
-                    "password": st.column_config.TextColumn("Contraseña (Editable)"),
-                    "rol": st.column_config.SelectboxColumn("Rol de Acceso", options=["admin", "asesor", "cajero"])
-                },
-                use_container_width=True
-            )
-            
-            if st.button("Guardar Cambios de Usuarios"):
-                with st.spinner("Actualizando contraseñas y permisos en el núcleo..."):
+        st.subheader("🔑 Puesto y permisos por usuario")
+        registros = supabase.table("usuarios").select("*").execute().data or []
+        if registros:
+            elegido = st.selectbox("Usuario a editar", [r["username"] for r in registros])
+            perfil = next(r for r in registros if r["username"] == elegido)
+            puestos = list(PUESTOS)
+            puesto = puesto_usuario(perfil)
+            if puesto and puesto not in puestos:
+                puestos.append(puesto)
+            with st.form("permisos_" + elegido):
+                nombre = st.text_input("Nombre completo", value=perfil.get("nombre_completo") or "")
+                nuevo_puesto = st.selectbox("Puesto", puestos, index=puestos.index(puesto) if puesto in puestos else 3)
+                rol = str(perfil.get("rol") or "asesor").strip().lower()
+                roles = list(dict.fromkeys(["asesor", "cajero", "admin", rol]))
+                nuevo_rol = st.selectbox("Perfil de módulos existentes", roles, index=roles.index(rol))
+                seleccion = st.multiselect("Permisos", list(PERMISOS),
+                                           default=sorted(permisos_usuario(perfil)), format_func=PERMISOS.get)
+                nueva_password = st.text_input("Nueva contraseña (vacía para conservar)", type="password")
+                if perfil.get("permisos") is None:
+                    st.caption("Usuario anterior: se muestran sus permisos heredados. Al guardar quedarán explícitos.")
+                guardar_perfil = st.form_submit_button("Guardar puesto y permisos")
+            if guardar_perfil:
+                if elegido == st.session_state.usuario_actual and "administrar_usuarios" not in seleccion:
+                    st.error("Conserva tu permiso de administrar usuarios; otro administrador puede retirarlo.")
+                elif not nombre.strip():
+                    st.error("Captura el nombre completo para las responsabilidades y la firma.")
+                else:
+                    cambios = {"nombre_completo": nombre.strip(), "puesto": nuevo_puesto,
+                               "rol": nuevo_rol, "permisos": seleccion}
+                    if nueva_password.strip():
+                        cambios["password"] = nueva_password.strip()
                     try:
-                        for _, row in edited_pass_df.iterrows():
-                            supabase.table("usuarios").update({
-                                "password": str(row['password']).strip(),
-                                "rol": str(row['rol']).strip()
-                            }).eq("username", row['username']).execute()
-                        st.success("¡Contraseñas y accesos actualizados correctamente!")
+                        supabase.table("usuarios").update(cambios).eq("username", elegido).execute()
+                        st.success("Puesto y permisos guardados.")
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Ocurrió un error al guardar: {e}")
+                    except Exception:
+                        st.error("No se pudo guardar. Verifica la conexión y la instalación de la nueva migración de permisos.")

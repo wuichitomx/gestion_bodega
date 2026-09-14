@@ -683,6 +683,9 @@ def generar_estadillo(fecha_trabajo, corte_x, piezas, tickets, plantilla_bytes=N
     )
 
 
+from permisos import OPERATIVOS, permisos_usuario, tiene_permiso, aplicar_responsabilidad, firma_revision
+
+
 def _estado_inicial():
     hoy = datetime.now(ZONA_HORARIA_CAJA).date().isoformat()
     usuario = st.session_state.get("usuario_actual", "")
@@ -720,7 +723,17 @@ def _limpiar_campos_caja():
         st.session_state.pop(clave, None)
 
 
+def _usuario_operador():
+    return {**st.session_state.get("usuario_info", {}),
+            "username": st.session_state.get("usuario_actual", "")}
+
+
 def _guardar_cambio(estado, repositorio, accion, cerrar=False):
+    try:
+        aplicar_responsabilidad(estado, _usuario_operador(), accion)
+    except ValueError as error:
+        st.error(str(error))
+        return False
     if repositorio is not None:
         try:
             guardado = repositorio.guardar(estado, accion, cerrar=cerrar)
@@ -969,7 +982,7 @@ def validar_documentos_correo(estado, fecha_trabajo, documentos):
     return errores
 
 
-def construir_correo_informacion(fecha_trabajo, adjuntos):
+def construir_correo_informacion(fecha_trabajo, adjuntos, estado):
     """Serializa el correo y sus adjuntos; nunca envía ni conecta con Gmail."""
     from email.message import EmailMessage
     from email.policy import SMTP
@@ -980,7 +993,7 @@ def construir_correo_informacion(fecha_trabajo, adjuntos):
     mensaje["Cc"] = CORREO_CC
     mensaje["Subject"] = f"Venta {fecha_trabajo:%d-%m-%Y}"
     mensaje["X-Unsent"] = "1"
-    mensaje.set_content(CORREO_CUERPO)
+    mensaje.set_content(CORREO_CUERPO + "\n\n" + firma_revision(estado))
     for nombre, contenido in adjuntos:
         nombre = str(nombre).replace("\\", "/").rsplit("/", 1)[-1]
         nombre = nombre.replace("\r", "").replace("\n", "") or "adjunto"
@@ -993,15 +1006,21 @@ def construir_correo_informacion(fecha_trabajo, adjuntos):
 
 
 def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_estadillo,
-                               crear_borrador, configuracion_gmail):
+                               crear_borrador, configuracion_gmail, repositorio=None):
     import hashlib
 
     st.divider()
     st.subheader("Correo de información")
+    operador = _usuario_operador()
+    puede_revisar = tiene_permiso(operador, "revisar_cierre")
+    puede_correo = tiene_permiso(operador, "preparar_correo")
+    if not (puede_revisar or puede_correo):
+        st.info("Se requiere permiso de revisión o de preparar correo.")
+        return
     st.caption("Un solo correo con la documentación completa de la fecha seleccionada. "
                "Esta sección sigue disponible después del cierre; no desbloquea la jornada.")
     usuario = str(st.session_state.get("usuario_actual", ""))
-    clave = "correo_" + hashlib.sha256(usuario.encode()).hexdigest()[:16] + "_" + fecha_trabajo.isoformat()
+    clave = "correo_" + hashlib.sha256((usuario + "/" + (repositorio.usuario if repositorio else usuario)).encode()).hexdigest()[:16] + "_" + fecha_trabajo.isoformat()
     erp = st.file_uploader("Reporte de ventas ERP", type=["xlsx", "xls", "xlsm", "csv", "pdf"],
                            key=clave + "_erp")
     terminales = st.file_uploader("Cierres de terminales bancarias", type=["jpg", "jpeg", "png", "pdf"],
@@ -1040,19 +1059,36 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
                             ("Terminales", bool(terminales) and all(a.size for a in terminales)),
                             ("Facturas", bool(facturas) and all(a.size for a in facturas))):
         st.write(f"{'✅ Disponible' if listo else '❌ Faltante'} — {etiqueta}")
+    huella_documentos = hashlib.sha256(b"".join(
+        hashlib.sha256(n.encode() + (c or b"")).digest()
+        for n, c in sorted(list(documentos.items()) + externos)
+    )).hexdigest()
+    if puede_revisar and st.button("Confirmar revisión de documentación y firma", key=clave + "_revision",
+                                  disabled=bool(errores) or repositorio is None):
+        estado["revision_documentacion"] = {"huella": huella_documentos}
+        if _guardar_cambio(estado, repositorio, "revisar_documentacion"):
+            st.rerun()
+        return
+    if (estado.get("revision_documentacion") or {}).get("huella") != huella_documentos:
+        errores.append("El responsable debe confirmar la revisión de estos documentos antes de preparar el correo.")
+    try:
+        firma = firma_revision(estado)
+    except ValueError as error:
+        firma = "Pendiente de revisión"
+        errores.append(str(error))
     for error in errores:
         st.warning(error)
     if not errores:
         st.success("Documentación y facturación aplicada verificadas para esta jornada.")
     st.markdown("##### Vista previa del correo")
-    st.text(f"Para: {CORREO_PARA}\nCC: {CORREO_CC}\nAsunto: Venta {fecha_trabajo:%d-%m-%Y}\n\n{CORREO_CUERPO}")
+    st.text(f"Para: {CORREO_PARA}\nCC: {CORREO_CC}\nAsunto: Venta {fecha_trabajo:%d-%m-%Y}\n\n{CORREO_CUERPO}\n\n{firma}")
     adjuntos = [(f"Corte_de_Caja_{fecha_trabajo:%Y-%m-%d}.xlsx", documentos.get("corte")),
                 (f"Estadillo_{fecha_trabajo:%Y-%m-%d}.xlsm", documentos.get("estadillo"))] + externos
     for nombre, contenido in adjuntos:
         st.text(f"{nombre} — {len(contenido or b'') / 1024:.1f} KB")
     eml = None
     if not errores:
-        eml = construir_correo_informacion(fecha_trabajo, adjuntos)
+        eml = construir_correo_informacion(fecha_trabajo, adjuntos, estado)
         if len(eml) > 25 * 1024 * 1024:
             errores.append("El correo supera el límite preventivo de 25 MB. Reduce el tamaño de los archivos.")
             st.warning(errores[-1])
@@ -1062,15 +1098,25 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
         st.info(pendiente)
     huella = hashlib.sha256(b"".join(hashlib.sha256((n.encode() + (c or b''))).digest()
                                     for n, c in adjuntos)).hexdigest()
-    anterior = st.session_state.get(clave + "_draft") or {}
+    huella = hashlib.sha256((huella + firma).encode()).hexdigest()
+    anterior = estado.get("borrador_correo") or st.session_state.get(clave + "_draft") or {}
     ya_preparado = anterior.get("huella") == huella and anterior.get("id")
     if st.button("Preparar correo de información", key=clave + "_preparar",
-                 disabled=bool(errores or pendiente or not crear_borrador or ya_preparado)):
+                 disabled=bool(errores or pendiente or not crear_borrador or ya_preparado or not puede_correo or repositorio is None)):
         try:
+            repositorio.comprobar_version(estado)
+            # Registrar quién prepara antes del efecto externo, con control de versión.
+            if not _guardar_cambio(estado, repositorio, "preparar_correo"):
+                return
+            estado = copy.deepcopy(st.session_state.arqueo_caja)
             resultado = crear_borrador(eml, borrador_id=anterior.get("id"))
             if not resultado or not resultado.get("id"):
                 raise ValueError("Gmail no confirmó el borrador.")
             st.session_state[clave + "_draft"] = {"id": resultado["id"], "huella": huella}
+            estado["borrador_correo"] = {"id": resultado["id"], "huella": huella}
+            if not _guardar_cambio(estado, repositorio, "preparar_correo"):
+                st.warning("Gmail creó el borrador, pero no se confirmó su registro. Revísalo en Gmail antes de reintentar.")
+                return
             st.success("Borrador preparado en Gmail. Revísalo allí antes de enviarlo.")
         except Exception:
             st.error("No se pudo confirmar el borrador. Revisa Gmail antes de reintentar para evitar duplicados; "
@@ -1079,7 +1125,7 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
         st.success("Esta versión ya tiene un borrador preparado en Gmail durante esta sesión.")
     st.caption("Al cambiar adjuntos se actualiza el mismo borrador durante esta sesión. "
                "Después de reiniciar la sesión, revisa Gmail antes de preparar otro.")
-    if st.checkbox("Habilitar respaldo opcional .eml", key=clave + "_respaldo"):
+    if puede_correo and st.checkbox("Habilitar respaldo opcional .eml", key=clave + "_respaldo"):
         st.info("El .eml es una descarga local: no crea un borrador en Gmail ni envía el correo.")
         st.download_button("Descargar correo .eml", data=eml or b"", disabled=not eml,
                            file_name=f"Venta_{fecha_trabajo:%d-%m-%Y}.eml", mime="message/rfc822",
@@ -1096,6 +1142,14 @@ def mostrar_arqueo_caja(
     configuracion_gmail=None,
 ):
     estado = _estado_inicial()
+    operador = _usuario_operador()
+    permisos = permisos_usuario(operador)
+    if not permisos & OPERATIVOS:
+        st.error("No tienes permiso para acceder a Caja.")
+        return
+    puede_arqueo = "realizar_arqueo" in permisos
+    puede_revisar = "revisar_cierre" in permisos
+    puede_facturar = "capturar_facturacion" in permisos
 
     st.header("Arqueo de caja")
     st.caption(
@@ -1119,6 +1173,24 @@ def mostrar_arqueo_caja(
         return None
 
     if repositorio is not None:
+        try:
+            propietarios = repositorio.listar_jornadas(fecha_trabajo)
+        except ErrorPersistenciaCaja as error:
+            st.error(str(error))
+            return
+        propietario = st.selectbox("Caja de la fecha / usuario que la inició", propietarios,
+                                   index=propietarios.index(repositorio.actor),
+                                   key="propietario_caja_" + fecha_trabajo.isoformat())
+        repositorio.usuario = propietario
+        contexto_anterior = st.session_state.get("caja_cargada")
+        if contexto_anterior and contexto_anterior != (propietario, estado["fecha"]):
+            _limpiar_campos_facturacion()
+            for campo in ("texto_corte_z", "texto_corte_x", "cierre_piezas", "cierre_tickets", "cierre_observaciones"):
+                st.session_state.pop(campo, None)
+            estado = {"fecha": estado["fecha"], "vouchers": [], "cortes": [], "ultimo_corte": None}
+            st.session_state.arqueo_caja = estado
+            st.session_state.pop("caja_cargada", None)
+        puede_arqueo = puede_arqueo and propietario == repositorio.actor
         if st.button("Recargar datos guardados"):
             _limpiar_campos_facturacion()
             st.session_state.pop("caja_cargada", None)
@@ -1131,6 +1203,12 @@ def mostrar_arqueo_caja(
         st.warning("Modo de prueba: los movimientos sólo viven en esta sesión. El guardado permanente todavía no está activado.")
     estado = copy.deepcopy(estado)
     cerrada = estado.get("_cerrada", False)
+    bloquear_arqueo = cerrada or not puede_arqueo
+    bloquear_revision = cerrada or not puede_revisar
+    for campo, etiqueta in (("responsable_arqueo", "Arqueo"), ("responsable_revision", "Revisión"),
+                            ("correo_preparado_por", "Preparación del correo")):
+        persona = estado.get(campo) or {}
+        st.caption(f"{etiqueta}: {persona.get('nombre', 'Pendiente')} — {persona.get('puesto', '')}")
     if cerrada:
         st.info("Esta jornada está cerrada. Puedes consultar sus movimientos y descargar los documentos.")
 
@@ -1140,21 +1218,21 @@ def mostrar_arqueo_caja(
     with st.form("form_nuevo_voucher", clear_on_submit=True):
         col1, col2, col3 = st.columns([2, 1, 2])
         with col1:
-            medio = st.selectbox("Medio de pago", MEDIOS_CAPTURA, disabled=cerrada)
+            medio = st.selectbox("Medio de pago", MEDIOS_CAPTURA, disabled=bloquear_arqueo)
         with col2:
             importe = st.number_input(
                 "Importe", min_value=0.0, value=None, step=0.01,
-                format="%.2f", placeholder="Escribe el importe", key="importe_voucher", disabled=cerrada,
+                format="%.2f", placeholder="Escribe el importe", key="importe_voucher", disabled=bloquear_arqueo,
             )
         with col3:
             folio = st.text_input(
-                "Folio o referencia (opcional)", disabled=cerrada,
+                "Folio o referencia (opcional)", disabled=bloquear_arqueo,
                 help="Puedes repetir una referencia con otro importe o medio de pago. "
                      "Si usas una tarjeta como referencia, captura sólo sus últimos cuatro dígitos.",
             )
-        guardar = st.form_submit_button("Agregar movimiento", type="primary", disabled=cerrada)
+        guardar = st.form_submit_button("Agregar movimiento", type="primary", disabled=bloquear_arqueo)
 
-    if guardar and not cerrada:
+    if guardar and not bloquear_arqueo:
         if importe is None or importe <= 0:
             st.error("Escribe un importe mayor a cero.")
         elif folio.strip() and any(
@@ -1243,9 +1321,9 @@ def mostrar_arqueo_caja(
                 format_func=etiquetas.get,
                 index=None,
                 placeholder="Selecciona el movimiento por tipo de pago, importe y folio",
-                key="movimiento_a_eliminar", disabled=cerrada,
+                key="movimiento_a_eliminar", disabled=bloquear_arqueo,
             )
-            if st.button("Eliminar movimiento", disabled=movimiento_id is None or cerrada):
+            if st.button("Eliminar movimiento", disabled=movimiento_id is None or bloquear_arqueo):
                 estado["vouchers"] = [
                     v for v in estado["vouchers"] if v["id"] != movimiento_id
                 ]
@@ -1264,10 +1342,10 @@ def mostrar_arqueo_caja(
         "Pega aquí el Corte Z completo",
         height=220,
         placeholder="Copia el contenido del reporte en el ERP y pégalo aquí.",
-        key="texto_corte_z", disabled=cerrada,
+        key="texto_corte_z", disabled=bloquear_arqueo,
     )
 
-    if st.button("Analizar Corte Z", type="primary", disabled=cerrada):
+    if st.button("Analizar Corte Z", type="primary", disabled=bloquear_arqueo):
         try:
             corte = interpretar_corte_z(texto_corte)
             estado["ultimo_corte"] = corte
@@ -1355,7 +1433,7 @@ def mostrar_arqueo_caja(
                 "Ya revisé los vouchers físicos y confirmo que son correctos. "
                 "Deseo continuar aunque el Corte Z tenga medios de pago cruzados.",
                 key="confirmar_diferencias_medios",
-                disabled=cerrada,
+                disabled=bloquear_arqueo,
             )
             if observacion_automatica:
                 st.caption("La incidencia queda registrada en el arqueo; las observaciones del formato son manuales.")
@@ -1369,13 +1447,13 @@ def mostrar_arqueo_caja(
         confirmar_fecha = True
         if fecha_corte and fecha_corte != fecha_trabajo:
             confirmar_fecha = st.checkbox(
-                "Confirmo que este Corte Z pertenece a la fecha de trabajo seleccionada.", disabled=cerrada
+                "Confirmo que este Corte Z pertenece a la fecha de trabajo seleccionada.", disabled=bloquear_arqueo
             )
 
         arqueo_aceptable = total_cuadra and (medios_cuadran or aceptar_diferencias)
         if st.button(
             "Guardar este arqueo",
-            disabled=not confirmar_fecha or not arqueo_aceptable or cerrada,
+            disabled=not confirmar_fecha or not arqueo_aceptable or bloquear_arqueo,
         ):
             estado["cortes"].append({
                 "hora": datetime.now(ZONA_HORARIA_CAJA).strftime("%H:%M"),
@@ -1431,9 +1509,9 @@ def mostrar_arqueo_caja(
         "Pega aquí el Corte X completo",
         height=220,
         placeholder="Este reporte se pega una sola vez al finalizar el día.",
-        key="texto_corte_x", disabled=cerrada,
+        key="texto_corte_x", disabled=bloquear_revision,
     )
-    if st.button("Analizar Corte X", disabled=not ultimo_arqueo_cuadrado or cerrada):
+    if st.button("Analizar Corte X", disabled=not ultimo_arqueo_cuadrado or bloquear_revision):
         try:
             estado["corte_x"] = interpretar_corte_x(texto_corte_x)
             estado.pop("documentos_cierre", None)
@@ -1477,7 +1555,7 @@ def mostrar_arqueo_caja(
                 min_value=0,
                 step=1,
                 key="cierre_piezas",
-                disabled=cerrada,
+                disabled=bloquear_revision,
             )
         with col_tickets:
             tickets = st.number_input(
@@ -1485,32 +1563,33 @@ def mostrar_arqueo_caja(
                 min_value=0,
                 step=1,
                 key="cierre_tickets",
-                disabled=cerrada,
+                disabled=bloquear_revision,
                 help="Sinapsis descuenta las notas de crédito de las transacciones de venta.",
             )
         observaciones = st.text_area(
             "Observaciones para el formato de corte (opcional)",
             key="cierre_observaciones",
-            disabled=cerrada,
+            disabled=bloquear_revision,
             help="Escribe aquí, con tus propias palabras, cualquier aclaración que deba aparecer en el formato.",
         )
         confirmar_fecha_x = True
         if fecha_x_distinta:
             confirmar_fecha_x = st.checkbox(
                 "Confirmo que este Corte X pertenece a la fecha de trabajo seleccionada.",
-                key="confirmar_fecha_corte_x", disabled=cerrada,
+                key="confirmar_fecha_corte_x", disabled=bloquear_revision,
             )
 
         if st.button(
             "Generar documentos para revisión",
             type="primary",
-            disabled=not confirmar_fecha_x or piezas <= 0 or not ultimo_arqueo_cuadrado or cerrada,
+            disabled=not confirmar_fecha_x or piezas <= 0 or not ultimo_arqueo_cuadrado or bloquear_revision,
         ):
             try:
                 usuario_info = st.session_state.get("usuario_info", {})
                 responsable = str(
-                    usuario_info.get("nombre_completo")
-                    or st.session_state.get("usuario_actual", "")
+                    (estado.get("responsable_arqueo") or {}).get("nombre")
+                    or (estado.get("cierre_datos") or {}).get("responsable")
+                    or (repositorio.usuario if repositorio else st.session_state.get("usuario_actual", ""))
                 )
                 maestro_drive = _obtener_base_corte_drive()
                 maestro_estadillo = cargar_maestro_estadillo(fecha_trabajo) if cargar_maestro_estadillo else None
@@ -1588,7 +1667,7 @@ def mostrar_arqueo_caja(
             st.error(f"No se pudo leer la facturación existente: {ex}")
             _mostrar_correo_informacion(
                 estado, fecha_trabajo, cargar_maestro_corte, cargar_maestro_estadillo,
-                crear_borrador_correo, configuracion_gmail,
+                crear_borrador_correo, configuracion_gmail, repositorio,
             )
             st.stop()
 
@@ -1633,6 +1712,7 @@ def mostrar_arqueo_caja(
             )
             tabla_facturas = st.data_editor(
                 editor_base,
+                disabled=not puede_facturar,
                 use_container_width=True,
                 hide_index=True,
                 num_rows="fixed",
@@ -1646,16 +1726,18 @@ def mostrar_arqueo_caja(
             st.markdown("##### Factura de público general")
             folio_global = st.text_input(
                 "Folio de factura global",
+                disabled=not puede_facturar,
                 value=_texto_limpio(facturacion_preview.get("folio_global")),
                 help="Sinapsis calcula automáticamente los rangos restantes de público general.",
                 key=f"folio_global_{fecha_trabajo.isoformat()}",
             )
             aplicar_facturacion = st.form_submit_button(
                 "Aplicar facturación y actualizar vista previa",
+                disabled=not puede_facturar,
                 type="primary",
             )
 
-        if aplicar_facturacion:
+        if aplicar_facturacion and puede_facturar:
             try:
                 captura = _facturacion_desde_editor(tabla_facturas, folio_global)
                 normalizada = normalizar_facturacion(captura, estado["corte_x"])
@@ -1674,7 +1756,7 @@ def mostrar_arqueo_caja(
                     )
                     st.rerun()
                 else:
-                    if _guardar_cambio(estado, repositorio, "preparar_documentos"):
+                    if _guardar_cambio(estado, repositorio, "facturacion"):
                         st.rerun()
                     st.stop()
             except ValueError as ex:
@@ -1705,7 +1787,7 @@ def mostrar_arqueo_caja(
                 st.warning("La vista previa tiene cambios de facturación pendientes de guardar en Drive.")
             if guardar_corte_drive is None or cargar_maestro_corte is None:
                 st.error("Falta conectar la carga y actualización del Corte en Google Drive.")
-            elif st.button("Guardar Corte actualizado en Google Drive", type="primary"):
+            elif st.button("Guardar Corte actualizado en Google Drive", type="primary", disabled=not puede_facturar):
                 try:
                     # Take the submitted form values as well, so no edits are silently omitted.
                     captura = normalizar_facturacion(
@@ -1720,6 +1802,8 @@ def mostrar_arqueo_caja(
                     nuevo_corte = actualizar_facturacion_corte(
                         maestro["contenido"], fecha_trabajo, estado["corte_x"], aplicada,
                     )
+                    if repositorio is not None:
+                        repositorio.comprobar_version(estado)
                     resultado_drive = guardar_corte_drive(fecha_trabajo, nuevo_corte)
                     estado["documentos_cierre"]["corte"] = nuevo_corte
                     estado.setdefault("cierre_datos", {})["facturacion"] = aplicada
@@ -1731,7 +1815,9 @@ def mostrar_arqueo_caja(
                         "guardado": True,
                         "actualizacion_facturacion": True,
                     }
-                    st.session_state.arqueo_caja = estado
+                    if not _guardar_cambio(estado, repositorio, "facturacion"):
+                        st.warning("Drive se actualizó, pero el registro de la jornada falló. Recarga y confirma la facturación antes de revisar el correo.")
+                        st.stop()
                     st.success("Corte de Caja actualizado en Google Drive. El Estadillo no fue modificado.")
                 except Exception as ex:
                     st.error(f"No se pudo actualizar el Corte de Caja en Google Drive: {ex}")
@@ -1766,7 +1852,8 @@ def mostrar_arqueo_caja(
                 datos.get("huella") == huella_movimientos(estado["vouchers"]))
             if not total_coincide:
                 st.error("La venta del Corte X no coincide con los movimientos. Corrige la diferencia antes del cierre definitivo.")
-            if st.button("Confirmar cierre definitivo", disabled=not listo):
+            if st.button("Confirmar cierre definitivo", disabled=not listo or not puede_revisar):
+                repositorio.comprobar_version(estado)
                 if guardar_documentos_drive is not None:
                     try:
                         resultado_drive = guardar_documentos_drive(fecha_trabajo, documentos)
@@ -1788,5 +1875,5 @@ def mostrar_arqueo_caja(
 
     _mostrar_correo_informacion(
         estado, fecha_trabajo, cargar_maestro_corte, cargar_maestro_estadillo,
-        crear_borrador_correo, configuracion_gmail,
+        crear_borrador_correo, configuracion_gmail, repositorio,
     )
