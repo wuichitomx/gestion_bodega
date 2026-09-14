@@ -1006,6 +1006,8 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
                            key=clave + "_erp")
     terminales = st.file_uploader("Cierres de terminales bancarias", type=["jpg", "jpeg", "png", "pdf"],
                                   accept_multiple_files=True, key=clave + "_terminales")
+    facturas = st.file_uploader("Facturas del día", type=["pdf"],
+                                accept_multiple_files=True, key=clave + "_facturas")
     st.caption("Las cargas son temporales y pertenecen a esta fecha y usuario. "
                "Si sales de la sesión o cambias de fecha, puede ser necesario cargarlas nuevamente.")
     documentos = {}
@@ -1020,7 +1022,11 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
                 errores.append(f"No se pudo consultar {tipo} en Drive. Revisa la conexión y vuelve a intentar.")
     errores.extend(validar_documentos_correo(estado, fecha_trabajo, documentos))
     externos = []
-    for etiqueta, archivos in (("Reporte ERP", [erp] if erp else []), ("Terminales", terminales or [])):
+    for etiqueta, archivos in (
+        ("Reporte ERP", [erp] if erp else []),
+        ("Terminales", terminales or []),
+        ("Facturas", facturas or []),
+    ):
         if not archivos:
             errores.append(f"Falta cargar: {etiqueta}.")
         for archivo in archivos:
@@ -1031,7 +1037,8 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
     for etiqueta, listo in (("Corte de Caja", bool(documentos.get("corte"))),
                             ("Estadillo", bool(documentos.get("estadillo"))),
                             ("Reporte ERP", bool(erp and erp.size)),
-                            ("Terminales", bool(terminales) and all(a.size for a in terminales))):
+                            ("Terminales", bool(terminales) and all(a.size for a in terminales)),
+                            ("Facturas", bool(facturas) and all(a.size for a in facturas))):
         st.write(f"{'✅ Disponible' if listo else '❌ Faltante'} — {etiqueta}")
     for error in errores:
         st.warning(error)
