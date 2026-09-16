@@ -1799,6 +1799,7 @@ if os.path.exists("ventas_diarias_temp.csv"):
 
 paginas_admin = {
     "📊 Operación": [
+        "💵 Arqueo de caja",
         "📊 Dashboard",
         "📈 Resumen PV",
         "📐 Rendimiento m²",
