@@ -1498,6 +1498,69 @@ def crear_grafica_barras_inteligente(df, campo_x, campo_y, titulo_x, titulo_y, c
     
     return (barras + texto_adentro + texto_afuera)
 
+def texto_usuario(valor):
+    return "" if valor is None or pd.isna(valor) else str(valor).strip()
+
+
+def codigo_usuario(valor):
+    codigo = texto_usuario(valor).casefold()
+    if codigo in ("none", "nan", "<na>"):
+        return ""
+    # Excel puede representar un identificador entero como 123.0.
+    return re.sub(r"^([0-9]+)\.0+$", r"\1", codigo)
+
+
+def meta_usuario(valor):
+    import math
+    if valor is None or pd.isna(valor) or valor == "":
+        return 0.0
+    meta = float(valor)
+    if not math.isfinite(meta) or meta < 0:
+        raise ValueError("La meta debe ser un número finito mayor o igual a cero.")
+    return meta
+
+
+def guardar_usuario_verificado(cliente, username, cambios):
+    # No degradar silenciosamente puesto/permisos si falta la migración.
+    try:
+        cliente.table("usuarios").update(cambios).eq("username", username).execute()
+        campos = ",".join(dict.fromkeys(["username", *cambios]))
+        filas = cliente.table("usuarios").select(campos).eq("username", username).execute().data or []
+    except Exception as exc:
+        # Las respuestas del servidor pueden incluir valores del perfil/contraseña.
+        raise ValueError("No se pudo completar o verificar la operación. Revisa la conexión, las políticas de usuarios y la migración de permisos; vuelve a consultar el usuario antes de reintentar.") from exc
+    if len(filas) != 1:
+        raise ValueError("No se pudo confirmar un único usuario guardado. Revisa el acceso de lectura y actualización a usuarios.")
+    registro = filas[0]
+    for campo, esperado in cambios.items():
+        actual = registro.get(campo)
+        iguales = (meta_usuario(actual) == esperado if campo == "meta_mensual"
+                   else set(actual or []) == set(esperado) if campo == "permisos"
+                   else actual == esperado)
+        if not iguales:
+            raise ValueError(f"No se confirmó el campo {campo}. Revisa las políticas de actualización y las reglas de usuarios en Supabase.")
+    return registro
+
+
+def preparar_metas_dashboard(ventas, usuarios):
+    usuarios = usuarios.copy()
+    for campo in ("username", "codigo_erp", "nombre_completo", "meta_mensual"):
+        if campo not in usuarios:
+            usuarios[campo] = None
+    usuarios["meta_mensual"] = usuarios["meta_mensual"].map(meta_usuario)
+    usuarios["_codigo_meta"] = usuarios.apply(
+        lambda r: codigo_usuario(r["codigo_erp"]) or codigo_usuario(r["username"]), axis=1)
+    vinculados = usuarios[usuarios["_codigo_meta"].ne("")]
+    if vinculados["_codigo_meta"].duplicated().any():
+        raise ValueError("Hay códigos ERP repetidos en usuarios. Corrígelos en Metas por asesor para evitar asignar ventas a dos personas.")
+    resultado = ventas.drop(columns=["meta_mensual", "codigo_erp", "_codigo_meta"], errors="ignore").copy()
+    resultado["_codigo_meta"] = resultado["codigo"].map(codigo_usuario)
+    resultado = resultado.merge(vinculados[["_codigo_meta", "meta_mensual"]],
+                                on="_codigo_meta", how="left", validate="many_to_one")
+    resultado["meta_mensual"] = resultado["meta_mensual"].fillna(0.0)
+    return resultado, float(usuarios["meta_mensual"].sum())
+
+
 def mostrar_resumen_piso_ventas(supabase):
     st.header("📊 Resumen Ejecutivo: Piso de Ventas (PV)")
     
@@ -1683,6 +1746,9 @@ def mostrar_resumen_piso_ventas(supabase):
 # ==========================================
 # INTERFAZ PRINCIPAL CON PESTAÑAS
 # ==========================================
+if "aviso_usuarios" in st.session_state:
+    st.success(st.session_state.pop("aviso_usuarios"))
+
 nombre_usuario_actual = st.session_state.usuario_info.get('nombre_completo', '')
 if not nombre_usuario_actual or nombre_usuario_actual == 'None':
     nombre_usuario_actual = st.session_state.usuario_actual
@@ -1691,7 +1757,7 @@ st.title(f"⚡ ¡Bienvenid@, {nombre_usuario_actual}!")
 
 # --- LÓGICA DE FELICITACIÓN Y LIDERAZGO MULTI-KPI ---
 if os.path.exists("ventas_diarias_temp.csv"):
-    df_v_felicitacion = pd.read_csv("ventas_diarias_temp.csv")
+    df_v_felicitacion = pd.read_csv("ventas_diarias_temp.csv", dtype={"codigo": str})
     if not df_v_felicitacion.empty and 'codigo' in df_v_felicitacion.columns:
         codigo_erp_bd_actual = st.session_state.usuario_info.get('codigo_erp', '')
         if not codigo_erp_bd_actual or codigo_erp_bd_actual == 'None':
@@ -1820,18 +1886,17 @@ if pagina_actual == "📊 Dashboard":
         st.header("📊 Tablero de Rendimiento Diario")
         st.info("ℹ️ No se ha cargado el reporte de ventas del día. El administrador puede subirlo en '📥 Cargas ERP e inventario'.")
     else:
-        df_v = pd.read_csv("ventas_diarias_temp.csv")
+        df_v = pd.read_csv("ventas_diarias_temp.csv", dtype={"codigo": str})
         res_u = supabase.table("usuarios").select("*").execute().data
         df_users = pd.DataFrame(res_u) if res_u else pd.DataFrame()
         
-        if not df_users.empty and "codigo_erp" in df_users.columns:
-            df_v = df_v.merge(df_users[['codigo_erp', 'meta_mensual']], left_on='codigo', right_on='codigo_erp', how='left')
-            df_v['meta_mensual'] = pd.to_numeric(df_v['meta_mensual'], errors='coerce').fillna(0)
-        else:
-            df_v['meta_mensual'] = 0.0
+        try:
+            df_v, meta_tienda_total = preparar_metas_dashboard(df_v, df_users)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
 
-        venta_tienda_neto = df_v['Neto_T_num'].iloc[0] if 'Neto_T_num' in df_v.columns else 0.0
-        meta_tienda_total = df_v['meta_mensual'].sum() if df_v['meta_mensual'].sum() > 0 else 1571112.40
+        venta_tienda_neto = df_v['Neto_T_num'].iloc[0] if 'Neto_T_num' in df_v.columns and not df_v.empty else 0.0
         alcance_tienda_pct = (venta_tienda_neto / meta_tienda_total) * 100 if meta_tienda_total > 0 else 0
         falta_tienda = max(0.0, meta_tienda_total - venta_tienda_neto)
         
@@ -1867,14 +1932,17 @@ if pagina_actual == "📊 Dashboard":
             if not codigo_erp_bd or codigo_erp_bd == 'None':
                 codigo_erp_bd = st.session_state.usuario_actual
                 
-            usuario_code = str(codigo_erp_bd).strip().lower()
-            user_row = df_v[df_v['codigo'].astype(str).str.strip().str.lower() == usuario_code]
+            usuario_code = codigo_usuario(codigo_erp_bd) or codigo_usuario(st.session_state.usuario_actual)
+            user_row = df_v[df_v['_codigo_meta'] == usuario_code]
+            if user_row.empty:
+                st.metric("Mi Meta Mensual", f"${meta_usuario(st.session_state.usuario_info.get('meta_mensual')):,.2f}")
+                st.info("Tu código ERP no aparece en el reporte de ventas cargado. Tu meta sí está registrada.")
             
             if not user_row.empty:
                 row_asesor = user_row.iloc[0]
-                nombre_asesor = row_asesor.get('nombre', usuario_code)
+                nombre_asesor = st.session_state.usuario_info.get('nombre_completo') or row_asesor.get('nombre', usuario_code)
                 venta_asesor_neto = row_asesor.get('Neto_D_num', 0.0)
-                meta_asesor = row_asesor.get('meta_mensual', 282800.23)
+                meta_asesor = meta_usuario(st.session_state.usuario_info.get('meta_mensual'))
                 alcance_asesor_pct = (venta_asesor_neto / meta_asesor) * 100 if meta_asesor > 0 else 0
                 falta_asesor = max(0.0, meta_asesor - venta_asesor_neto)
                 
@@ -3194,26 +3262,45 @@ if pagina_actual == "🎯 Metas por asesor":
                 if col not in df_u.columns:
                     df_u[col] = ""
                     
-            edited_df = st.data_editor(
-                df_u[['username', 'codigo_erp', 'nombre_completo', 'meta_mensual']],
-                column_config={
-                    "username": st.column_config.TextColumn("Usuario App", disabled=True),
-                    "codigo_erp": st.column_config.TextColumn("Código ERP"),
-                    "nombre_completo": st.column_config.TextColumn("Nombre Completo"),
-                    "meta_mensual": st.column_config.NumberColumn("Meta Mensual ($)", format="$%.2f", step=0.01, min_value=0.0)
-                },
-                use_container_width=True
-            )
-            
-            if st.button("Guardar Cambios de Metas"):
-                for _, row in edited_df.iterrows():
-                    supabase.table("usuarios").update({
-                        "codigo_erp": str(row['codigo_erp']).strip(),
-                        "nombre_completo": str(row['nombre_completo']).strip(),
-                        "meta_mensual": float(row['meta_mensual']) if row['meta_mensual'] else 0.0
-                    }).eq("username", row['username']).execute()
-                st.success("¡Metas guardadas correctamente en la red!")
-                st.rerun()
+            df_u['meta_mensual'] = df_u['meta_mensual'].map(meta_usuario)
+            with st.form("form_metas_asesores"):
+                edited_df = st.data_editor(
+                    df_u[['username', 'codigo_erp', 'nombre_completo', 'meta_mensual']],
+                    column_config={
+                        "username": st.column_config.TextColumn("Usuario App", disabled=True),
+                        "codigo_erp": st.column_config.TextColumn("Código ERP"),
+                        "nombre_completo": st.column_config.TextColumn("Nombre Completo"),
+                        "meta_mensual": st.column_config.NumberColumn("Meta Mensual ($)", format="$%.2f", step=0.01, min_value=0.0)
+                    },
+                    key="editor_metas_" + str(st.session_state.get("revision_metas", 0)),
+                    hide_index=True,
+                    use_container_width=True
+                )
+                guardar_metas = st.form_submit_button("Guardar Cambios de Metas")
+            if guardar_metas:
+                confirmados = 0
+                try:
+                    # Validar todo antes de comenzar; guardar sólo campos editados.
+                    preparar_metas_dashboard(pd.DataFrame(columns=["codigo"]), edited_df)
+                    pendientes = []
+                    for _, row in edited_df.iterrows():
+                        original = df_u.loc[df_u['username'] == row['username']].iloc[0]
+                        cambios = {}
+                        for campo in ('codigo_erp', 'nombre_completo', 'meta_mensual'):
+                            normalizar = meta_usuario if campo == 'meta_mensual' else texto_usuario
+                            if normalizar(row[campo]) != normalizar(original[campo]):
+                                cambios[campo] = normalizar(row[campo])
+                        if cambios:
+                            pendientes.append((row['username'], cambios))
+                    for username, cambios in pendientes:
+                        guardar_usuario_verificado(supabase, username, cambios)
+                        confirmados += 1
+                except Exception as exc:
+                    st.error(f"Guardado incompleto: {confirmados} usuarios confirmados. {exc}")
+                else:
+                    st.session_state.revision_metas = st.session_state.get("revision_metas", 0) + 1
+                    st.session_state.aviso_usuarios = "Metas guardadas y verificadas."
+                    st.rerun()
 
 # ------------------------------------------
 # 10. PESTAÑA: GESTIÓN USUARIOS (SÓLO ADMIN)
@@ -3289,7 +3376,7 @@ if pagina_actual == "👥 Gestión Usuarios":
             puesto = puesto_usuario(perfil)
             if puesto and puesto not in puestos:
                 puestos.append(puesto)
-            with st.form("permisos_" + elegido):
+            with st.form("permisos_" + elegido + "_" + str(st.session_state.get("revision_perfil", 0))):
                 nombre = st.text_input("Nombre completo", value=perfil.get("nombre_completo") or "")
                 nuevo_puesto = st.selectbox("Puesto", puestos, index=puestos.index(puesto) if puesto in puestos else 3)
                 rol = str(perfil.get("rol") or "asesor").strip().lower()
@@ -3312,8 +3399,9 @@ if pagina_actual == "👥 Gestión Usuarios":
                     if nueva_password.strip():
                         cambios["password"] = nueva_password.strip()
                     try:
-                        supabase.table("usuarios").update(cambios).eq("username", elegido).execute()
-                        st.success("Puesto y permisos guardados.")
+                        guardar_usuario_verificado(supabase, elegido, cambios)
+                        st.session_state.revision_perfil = st.session_state.get("revision_perfil", 0) + 1
+                        st.session_state.aviso_usuarios = "Nombre, puesto, perfil y permisos guardados y verificados."
                         st.rerun()
-                    except Exception:
-                        st.error("No se pudo guardar. Verifica la conexión y la instalación de la nueva migración de permisos.")
+                    except Exception as exc:
+                        st.error(f"No se pudo confirmar el guardado. {exc}")
