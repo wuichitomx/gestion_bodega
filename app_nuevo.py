@@ -1387,7 +1387,7 @@ if not st.session_state.autenticado:
         render_logo("logo_adidas.png", 160)
         
         st.markdown('<p class="login-title">⚡ Sinapsis</p>', unsafe_allow_html=True)
-        st.caption("v3.29 (Neural Core) | Desarrollado por Risal Tech")
+        st.caption("v3.30 (Neural Core) | Desarrollado por Risal Tech")
         
         with st.form("login_form"):
             u = st.text_input("Usuario")
@@ -1431,7 +1431,7 @@ permisos_actuales = permisos_usuario(perfiles[0])
 with st.sidebar:
     render_logo("logo_adidas.png", 120)
     st.markdown("### ⚡ Sinapsis")
-    st.caption("🚀 **Versión:** 3.29 (Neural Core)")
+    st.caption("🚀 **Versión:** 3.30 (Neural Core)")
     st.caption(f"👤 **Usuario:** {st.session_state.usuario_actual}")
     
     if st.button("🚪 Cerrar Sesión"):
