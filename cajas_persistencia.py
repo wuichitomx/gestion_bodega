@@ -99,36 +99,36 @@ class RepositorioCajas:
                 'p_accion': accion, 'p_operacion': str(uuid4()), 'p_cerrar': cerrar,
             }).execute()
             return restaurar_estado(respuesta.data)
-        eexcept Exception as error:
-    detalle = str(error)
+        except Exception as error:
+            detalle = str(error)
 
-    if any(codigo in detalle for codigo in ('CAJA_CONFLICTO', 'CAJA_CERRADA')):
-        raise ConflictoCaja(
-            'La caja cambió en otra sesión o ya está cerrada. '
-            'Recarga los datos guardados antes de continuar.'
-        ) from None
+            if any(codigo in detalle for codigo in ('CAJA_CONFLICTO', 'CAJA_CERRADA')):
+                raise ConflictoCaja(
+                    'La caja cambió en otra sesión o ya está cerrada. '
+                    'Recarga los datos guardados antes de continuar.'
+                ) from None
 
-    codigos_seguros = (
-        'CAJA_DATOS_INVALIDOS',
-        'CAJA_USUARIO_NO_AUTORIZADO',
-        'CAJA_ACCION_INVALIDA',
-        'CAJA_JORNADA_INEXISTENTE',
-        'CAJA_CIERRE_INCOMPLETO',
-        'CAJA_PUESTO_REQUERIDO',
-        'CAJA_REVISION_REQUERIDA',
-    )
+            codigos_seguros = (
+                'CAJA_DATOS_INVALIDOS',
+                'CAJA_USUARIO_NO_AUTORIZADO',
+                'CAJA_ACCION_INVALIDA',
+                'CAJA_JORNADA_INEXISTENTE',
+                'CAJA_CIERRE_INCOMPLETO',
+                'CAJA_PUESTO_REQUERIDO',
+                'CAJA_REVISION_REQUERIDA',
+            )
 
-    codigo_detectado = next(
-        (codigo for codigo in codigos_seguros if codigo in detalle),
-        None,
-    )
+            codigo_detectado = next(
+                (codigo for codigo in codigos_seguros if codigo in detalle),
+                None,
+            )
 
-    if codigo_detectado:
-        raise ErrorPersistenciaCaja(
-            f'No se pudo guardar en Supabase. Código: {codigo_detectado}.'
-        ) from None
+            if codigo_detectado:
+                raise ErrorPersistenciaCaja(
+                    f'No se pudo guardar en Supabase. Código: {codigo_detectado}.'
+                ) from None
 
-    raise ErrorPersistenciaCaja(
-        'No se pudo confirmar el guardado en Supabase. '
-        'No repitas la captura: recarga los datos guardados para comprobar si llegó.'
-    ) from None
+            raise ErrorPersistenciaCaja(
+                'No se pudo confirmar el guardado en Supabase. '
+                'No repitas la captura: recarga los datos guardados para comprobar si llegó.'
+            ) from None
