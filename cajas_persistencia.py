@@ -89,20 +89,40 @@ class RepositorioCajas:
     def guardar(self, estado, accion, cerrar=False):
         if not tiene_permiso(self.usuario_info, ACCIONES.get(accion, '')):
             raise ErrorPersistenciaCaja('No tienes permiso para esta acción.')
+
         if ACCIONES.get(accion) == 'realizar_arqueo' and self.usuario != self.actor:
-            raise ErrorPersistenciaCaja('Los movimientos sólo los captura el propietario de esta caja.')
+            raise ErrorPersistenciaCaja(
+                'Los movimientos sólo los captura el propietario de esta caja.'
+            )
+
         try:
-            respuesta = self.cliente.rpc('cajas_guardar_jornada_v2', {
-                'p_actor': self.actor,
-                'p_usuario': self.usuario, 'p_fecha': estado['fecha'],
-                'p_version': estado.get('_version', 0), 'p_datos': serializar_estado(estado),
-                'p_accion': accion, 'p_operacion': str(uuid4()), 'p_cerrar': cerrar,
-            }).execute()
-            return restaurar_estado(respuesta.data)
+            datos_serializados = serializar_estado(estado)
+        except Exception as error:
+            raise ErrorPersistenciaCaja(
+                f'Error de persistencia [PREPARACION]: {type(error).__name__}'
+            ) from None
+
+        try:
+            respuesta = self.cliente.rpc(
+                'cajas_guardar_jornada_v2',
+                {
+                    'p_actor': self.actor,
+                    'p_usuario': self.usuario,
+                    'p_fecha': estado['fecha'],
+                    'p_version': estado.get('_version', 0),
+                    'p_datos': datos_serializados,
+                    'p_accion': accion,
+                    'p_operacion': str(uuid4()),
+                    'p_cerrar': cerrar,
+                }
+            ).execute()
         except Exception as error:
             detalle = str(error)
 
-            if any(codigo in detalle for codigo in ('CAJA_CONFLICTO', 'CAJA_CERRADA')):
+            if any(
+                codigo in detalle
+                for codigo in ('CAJA_CONFLICTO', 'CAJA_CERRADA')
+            ):
                 raise ConflictoCaja(
                     'La caja cambió en otra sesión o ya está cerrada. '
                     'Recarga los datos guardados antes de continuar.'
@@ -119,16 +139,26 @@ class RepositorioCajas:
             )
 
             codigo_detectado = next(
-                (codigo for codigo in codigos_seguros if codigo in detalle),
+                (
+                    codigo
+                    for codigo in codigos_seguros
+                    if codigo in detalle
+                ),
                 None,
             )
 
             if codigo_detectado:
                 raise ErrorPersistenciaCaja(
-                    f'No se pudo guardar en Supabase. Código: {codigo_detectado}.'
+                    f'Error de persistencia [RPC]: {codigo_detectado}'
                 ) from None
 
             raise ErrorPersistenciaCaja(
-                'No se pudo confirmar el guardado en Supabase. '
-                'No repitas la captura: recarga los datos guardados para comprobar si llegó.'
+                f'Error de persistencia [RPC]: {type(error).__name__}'
+            ) from None
+
+        try:
+            return restaurar_estado(respuesta.data)
+        except Exception as error:
+            raise ErrorPersistenciaCaja(
+                f'Error de persistencia [RESPUESTA]: {type(error).__name__}'
             ) from None
