@@ -117,7 +117,24 @@ class RepositorioCajas:
                 }
             ).execute()
         except Exception as error:
-            detalle = str(error)
+            # Estos textos sólo se inspeccionan para reconocer códigos seguros.
+            # Nunca se incorporan al mensaje que se muestra al usuario.
+            try:
+                detalle = str(error)
+            except Exception:
+                detalle = ''
+            try:
+                mensaje = getattr(error, 'message', None)
+            except Exception:
+                mensaje = None
+            if isinstance(mensaje, str):
+                detalle += ' ' + mensaje
+            try:
+                codigo_rpc = getattr(error, 'code', None)
+            except Exception:
+                codigo_rpc = None
+            if isinstance(codigo_rpc, str):
+                detalle += ' ' + codigo_rpc
 
             if any(
                 codigo in detalle
@@ -152,9 +169,20 @@ class RepositorioCajas:
                     f'Error de persistencia [RPC]: {codigo_detectado}'
                 ) from None
 
-            raise ErrorPersistenciaCaja(
-                f'Error de persistencia [RPC]: {type(error).__name__}'
-            ) from None
+            diagnostico = f'Error de persistencia [RPC]: {type(error).__name__}'
+            # Aceptar únicamente un identificador breve; descartar objetos,
+            # texto libre y caracteres que puedan inyectar contenido al mensaje.
+            if type(codigo_rpc) is int:
+                codigo_rpc = str(codigo_rpc)
+            if (
+                isinstance(codigo_rpc, str)
+                and 1 <= len(codigo_rpc) <= 64
+                and codigo_rpc.isascii()
+                and all(caracter.isalnum() or caracter in '_-' for caracter in codigo_rpc)
+            ):
+                diagnostico += f' | código: {codigo_rpc}'
+
+            raise ErrorPersistenciaCaja(diagnostico) from None
 
         try:
             return restaurar_estado(respuesta.data)
