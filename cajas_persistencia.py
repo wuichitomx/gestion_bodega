@@ -34,7 +34,8 @@ def huella_movimientos(vouchers):
 def serializar_estado(estado):
     campos = ('fecha', 'vouchers', 'cortes', 'ultimo_corte', 'corte_x', 'cierre_datos', 'texto_z', 'texto_x',
               'responsable_arqueo', 'responsable_revision', 'correo_preparado_por',
-              'revision_documentacion', 'borrador_correo')
+              'revision_documentacion', 'borrador_correo', 'motivo_correccion_arqueo',
+              'ultima_correccion_arqueo')
     return json.loads(json.dumps({k: estado[k] for k in campos if k in estado},
                                default=lambda v: v.isoformat() if isinstance(v, (date, datetime)) else None,
                                allow_nan=False))
@@ -153,6 +154,7 @@ class RepositorioCajas:
                 'CAJA_CIERRE_INCOMPLETO',
                 'CAJA_PUESTO_REQUERIDO',
                 'CAJA_REVISION_REQUERIDA',
+                'CAJA_CORRECCION_REQUERIDA',
             )
 
             codigo_detectado = next(

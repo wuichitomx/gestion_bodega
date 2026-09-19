@@ -1203,14 +1203,84 @@ def mostrar_arqueo_caja(
         st.warning("Modo de prueba: los movimientos sólo viven en esta sesión. El guardado permanente todavía no está activado.")
     estado = copy.deepcopy(estado)
     cerrada = estado.get("_cerrada", False)
-    bloquear_arqueo = cerrada or not puede_arqueo
-    bloquear_revision = cerrada or not puede_revisar
+
+    propietario_actual = repositorio.usuario if repositorio is not None else st.session_state.get("usuario_actual", "")
+    actor_actual = repositorio.actor if repositorio is not None else st.session_state.get("usuario_actual", "")
+    jornada_existente = bool(estado.get("_version", 0))
+    requiere_correccion_gerencial = cerrada or (
+        jornada_existente and propietario_actual != actor_actual
+    )
+    clave_correccion = (
+        f"correccion_arqueo_{propietario_actual}_{fecha_trabajo.isoformat()}"
+    )
+    clave_motivo_correccion = clave_correccion + "_motivo"
+    modo_correccion = bool(st.session_state.get(clave_correccion, False))
+    motivo_correccion = str(st.session_state.get(clave_motivo_correccion, "") or "").strip()
+
+    if requiere_correccion_gerencial and puede_revisar and repositorio is not None:
+        with st.expander("Corrección gerencial de arqueo", expanded=modo_correccion):
+            st.caption(
+                "Úsala sólo para completar o corregir una jornada ya iniciada. "
+                "La jornada conserva su propietario original y cada cambio queda auditado."
+            )
+            motivo_correccion = st.text_area(
+                "Motivo de la corrección",
+                key=clave_motivo_correccion,
+                disabled=modo_correccion,
+                placeholder="Ejemplo: faltó capturar el efectivo del cierre.",
+            ).strip()
+            if not modo_correccion:
+                confirmar_correccion = st.checkbox(
+                    "Confirmo que revisaré los comprobantes antes de guardar cambios.",
+                    key=clave_correccion + "_confirmar",
+                )
+                if st.button(
+                    "Habilitar corrección de arqueo",
+                    key=clave_correccion + "_habilitar",
+                    disabled=not confirmar_correccion or len(motivo_correccion) < 5,
+                ):
+                    st.session_state[clave_correccion] = True
+                    st.rerun()
+            else:
+                st.warning(
+                    "Modo corrección activo. Los cambios se guardarán con tu usuario y el motivo indicado."
+                )
+                if st.button("Cancelar modo corrección", key=clave_correccion + "_cancelar"):
+                    st.session_state[clave_correccion] = False
+                    st.rerun()
+
+    def _accion_persistencia(accion):
+        if modo_correccion and accion in {
+            "agregar_movimiento", "eliminar_movimiento", "analizar_z",
+            "guardar_arqueo", "analizar_x", "preparar_documentos",
+        }:
+            estado["motivo_correccion_arqueo"] = motivo_correccion
+            return "corregir_arqueo"
+        return accion
+
+    bloquear_arqueo = (cerrada and not modo_correccion) or (not puede_arqueo and not modo_correccion)
+    bloquear_revision = (cerrada and not modo_correccion) or not puede_revisar
     for campo, etiqueta in (("responsable_arqueo", "Arqueo"), ("responsable_revision", "Revisión"),
                             ("correo_preparado_por", "Preparación del correo")):
         persona = estado.get(campo) or {}
         st.caption(f"{etiqueta}: {persona.get('nombre', 'Pendiente')} — {persona.get('puesto', '')}")
     if cerrada:
-        st.info("Esta jornada está cerrada. Puedes consultar sus movimientos y descargar los documentos.")
+        if modo_correccion:
+            st.info(
+                "Esta jornada sigue cerrada, pero la corrección gerencial está habilitada temporalmente."
+            )
+        else:
+            st.info(
+                "Esta jornada está cerrada. Puedes consultarla y, con permiso de revisión, "
+                "habilitar una corrección gerencial."
+            )
+    ultima_correccion = estado.get("ultima_correccion_arqueo") or {}
+    if ultima_correccion:
+        st.caption(
+            "Última corrección: "
+            f"{ultima_correccion.get('nombre', ultima_correccion.get('usuario', ''))} — "
+            f"{ultima_correccion.get('motivo', '')}"
+        )
 
     st.subheader("1. Registrar movimiento")
     if st.session_state.pop("limpiar_importe_voucher", False):
@@ -1254,8 +1324,9 @@ def mostrar_arqueo_caja(
                 "folio": folio.strip(),
             })
             estado.pop("documentos_cierre", None)
-            estado.pop("cierre_datos", None)
-            if _guardar_cambio(estado, repositorio, "agregar_movimiento"):
+            if not modo_correccion:
+                estado.pop("cierre_datos", None)
+            if _guardar_cambio(estado, repositorio, _accion_persistencia("agregar_movimiento")):
                 st.session_state["limpiar_importe_voucher"] = True
                 st.rerun()
             st.stop()
@@ -1328,8 +1399,9 @@ def mostrar_arqueo_caja(
                     v for v in estado["vouchers"] if v["id"] != movimiento_id
                 ]
                 estado.pop("documentos_cierre", None)
-                estado.pop("cierre_datos", None)
-                if _guardar_cambio(estado, repositorio, "eliminar_movimiento"):
+                if not modo_correccion:
+                    estado.pop("cierre_datos", None)
+                if _guardar_cambio(estado, repositorio, _accion_persistencia("eliminar_movimiento")):
                     st.rerun()
                 st.stop()
     else:
@@ -1350,7 +1422,7 @@ def mostrar_arqueo_caja(
             corte = interpretar_corte_z(texto_corte)
             estado["ultimo_corte"] = corte
             estado["texto_z"] = texto_corte
-            if _guardar_cambio(estado, repositorio, "analizar_z"):
+            if _guardar_cambio(estado, repositorio, _accion_persistencia("analizar_z")):
                 st.rerun()
             st.stop()
         except ValueError as ex:
@@ -1473,7 +1545,7 @@ def mostrar_arqueo_caja(
             elif medios_cuadran:
                 estado.pop("observacion_automatica", None)
             estado["ultimo_corte"] = None
-            if _guardar_cambio(estado, repositorio, "guardar_arqueo"):
+            if _guardar_cambio(estado, repositorio, _accion_persistencia("guardar_arqueo")):
                 st.rerun()
             st.stop()
 
@@ -1515,9 +1587,10 @@ def mostrar_arqueo_caja(
         try:
             estado["corte_x"] = interpretar_corte_x(texto_corte_x)
             estado.pop("documentos_cierre", None)
-            estado.pop("cierre_datos", None)
+            if not modo_correccion:
+                estado.pop("cierre_datos", None)
             estado["texto_x"] = texto_corte_x
-            if _guardar_cambio(estado, repositorio, "analizar_x"):
+            if _guardar_cambio(estado, repositorio, _accion_persistencia("analizar_x")):
                 st.rerun()
             st.stop()
         except ValueError as ex:
@@ -1621,7 +1694,7 @@ def mostrar_arqueo_caja(
                     "facturacion": estado.get("cierre_datos", {}).get("facturacion", {}),
                     "huella": huella_movimientos(estado["vouchers"]),
                 }
-                if _guardar_cambio(estado, repositorio, "preparar_documentos"):
+                if _guardar_cambio(estado, repositorio, _accion_persistencia("preparar_documentos")):
                     st.rerun()
                 st.stop()
             except Exception as ex:
@@ -1844,6 +1917,57 @@ def mostrar_arqueo_caja(
             )
         if not cerrada:
             st.warning("Estos archivos son borradores para revisión. Sinapsis todavía no envía correos.")
+        if repositorio is not None and cerrada and modo_correccion:
+            st.caption(
+                "La jornada permanece cerrada. Guarda los documentos corregidos en Drive "
+                "cuando el arqueo y el Corte X ya estén revisados."
+            )
+            datos = estado.get("cierre_datos", {})
+            total_coincide = abs(
+                sum(v["importe"] for v in estado["vouchers"])
+                - estado.get("corte_x", {}).get("venta", 0)
+            ) < 0.01
+            listo_correccion = (
+                ultimo_arqueo_cuadrado
+                and total_coincide
+                and datos.get("fecha_confirmada", False)
+                and datos.get("huella") == huella_movimientos(estado["vouchers"])
+                and bool(documentos.get("corte"))
+                and bool(documentos.get("estadillo"))
+            )
+            if not total_coincide:
+                st.error(
+                    "La venta del Corte X no coincide con los movimientos corregidos. "
+                    "Corrige la diferencia antes de actualizar Drive."
+                )
+            if st.button(
+                "Guardar documentos corregidos en Google Drive",
+                type="primary",
+                disabled=not listo_correccion or guardar_documentos_drive is None,
+            ):
+                try:
+                    repositorio.comprobar_version(estado)
+                    resultado_drive = guardar_documentos_drive(fecha_trabajo, documentos)
+                    estado["documentos_drive"] = {
+                        "ruta": resultado_drive.get("ruta", ""),
+                        "nombre_corte": resultado_drive.get("nombre_corte", ""),
+                        "nombre_estadillo": resultado_drive.get("nombre_estadillo", ""),
+                        "guardado": True,
+                        "correccion_arqueo": True,
+                    }
+                    if _guardar_cambio(estado, repositorio, _accion_persistencia("preparar_documentos")):
+                        st.success(
+                            "Corrección guardada en Google Drive. La jornada permanece cerrada "
+                            "y requiere una nueva revisión documental antes de preparar el correo."
+                        )
+                        st.rerun()
+                    st.stop()
+                except Exception as ex:
+                    st.error(
+                        "No se pudieron guardar los documentos corregidos en Google Drive. "
+                        f"Detalle: {ex}"
+                    )
+
         if repositorio is not None and not cerrada:
             st.caption("El cierre definitivo guarda esta jornada y bloquea nuevas capturas y eliminaciones.")
             datos = estado.get("cierre_datos", {})

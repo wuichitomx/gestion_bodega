@@ -13,7 +13,8 @@ OPERATIVOS = set(PERMISOS) - {'administrar_usuarios'}
 ACCIONES = {
     **dict.fromkeys(('importar_sesion', 'agregar_movimiento', 'eliminar_movimiento',
                      'analizar_z', 'guardar_arqueo'), 'realizar_arqueo'),
-    **dict.fromkeys(('analizar_x', 'preparar_documentos', 'cerrar', 'revisar_documentacion'), 'revisar_cierre'),
+    **dict.fromkeys(('analizar_x', 'preparar_documentos', 'cerrar', 'revisar_documentacion',
+                     'corregir_arqueo'), 'revisar_cierre'),
     'facturacion': 'capturar_facturacion',
     'preparar_correo': 'preparar_correo',
 }
