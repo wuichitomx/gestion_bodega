@@ -18,10 +18,15 @@ ZONA_HORARIA_CAJA = ZoneInfo("America/Mexico_City")
 
 MEDIOS_CAPTURA = [
     "TC AFIRME",
+    "TC AFIRME - EXTRANJERA",
     "TC KUSHKI",
+    "TC KUSHKI - EXTRANJERA",
     "TC AMERICAN EXPRESS",
+    "TC AMERICAN EXPRESS - KUSHKI",
     "TC BANCOMER",
+    "TC BANCOMER - EXTRANJERA",
     "TC BANAMEX",
+    "TC BANAMEX - EXTRANJERA",
     "TC AFIRME - MESES SIN INTERESES",
     "TC KUSHKI - MESES SIN INTERESES",
     "TC AMERICAN EXPRESS - MESES SIN INTERESES",
@@ -29,9 +34,13 @@ MEDIOS_CAPTURA = [
     "TC BANAMEX - MESES SIN INTERESES",
     "BONO DEVOLUCION",
     "TD AFIRME",
+    "TD AFIRME - EXTRANJERA",
     "TD KUSHKI",
+    "TD KUSHKI - EXTRANJERA",
     "TD BANCOMER",
+    "TD BANCOMER - EXTRANJERA",
     "TD BANAMEX",
+    "TD BANAMEX - EXTRANJERA",
     "TRANSFERENCIA BBVA",
     "EFECTIVO",
     "NOTA CREDITO",
@@ -51,10 +60,19 @@ MEDIOS_ERP = [
     "NOTA CREDITO",
 ]
 
-# El Corte Z agrupa Kushki y los meses sin intereses dentro del banco o
+# El Corte Z agrupa extranjeras, Kushki y meses sin intereses dentro del banco o
 # adquirente correspondiente. Conservamos el detalle para llenar el formato
 # final, pero comparamos la suma contra el renglón agregado del ERP.
 GRUPO_CORTE_Z = {
+    "TC AFIRME - EXTRANJERA": "TC AFIRME",
+    "TC KUSHKI - EXTRANJERA": "TC AFIRME",
+    "TC BANCOMER - EXTRANJERA": "TC BANCOMER",
+    "TC BANAMEX - EXTRANJERA": "TC BANAMEX",
+    "TD AFIRME - EXTRANJERA": "TD AFIRME",
+    "TD KUSHKI - EXTRANJERA": "TD AFIRME",
+    "TD BANCOMER - EXTRANJERA": "TD BANCOMER",
+    "TD BANAMEX - EXTRANJERA": "TD BANAMEX",
+    "TC AMERICAN EXPRESS - KUSHKI": "TC AMERICAN EXPRESS",
     "TC AFIRME": "TC AFIRME",
     "TC KUSHKI": "TC AFIRME",
     "TC AFIRME - MESES SIN INTERESES": "TC AFIRME",
@@ -617,6 +635,10 @@ def generar_formato_corte(
         "E17": detalle.get("TRANSFERENCIA BBVA", 0.0),
         "E22": detalle.get("TC AFIRME", 0.0),
         "E23": detalle.get("TD AFIRME", 0.0),
+        "E24": (
+            detalle.get("TC AFIRME - EXTRANJERA", 0.0)
+            + detalle.get("TD AFIRME - EXTRANJERA", 0.0)
+        ),
         "E25": (
         detalle.get("TC AFIRME - MESES SIN INTERESES", 0.0)
         + detalle.get("TC AMERICAN EXPRESS - MESES SIN INTERESES", 0.0)
@@ -627,11 +649,24 @@ def generar_formato_corte(
         + detalle.get("TC KUSHKI - MESES SIN INTERESES", 0.0)
         ),
         "E30": detalle.get("TD KUSHKI", 0.0),
+        "E31": (
+            detalle.get("TC KUSHKI - EXTRANJERA", 0.0)
+            + detalle.get("TD KUSHKI - EXTRANJERA", 0.0)
+        ),
+        "E32": detalle.get("TC AMERICAN EXPRESS - KUSHKI", 0.0),
         "E35": detalle.get("TC BANCOMER", 0.0),
         "E36": detalle.get("TD BANCOMER", 0.0),
+        "E37": (
+            detalle.get("TC BANCOMER - EXTRANJERA", 0.0)
+            + detalle.get("TD BANCOMER - EXTRANJERA", 0.0)
+        ),
         "E38": detalle.get("TC BANCOMER - MESES SIN INTERESES", 0.0),
         "E41": detalle.get("TC BANAMEX", 0.0),
         "E42": detalle.get("TD BANAMEX", 0.0),
+        "E43": (
+            detalle.get("TC BANAMEX - EXTRANJERA", 0.0)
+            + detalle.get("TD BANAMEX - EXTRANJERA", 0.0)
+        ),
         "E44": detalle.get("TC BANAMEX - MESES SIN INTERESES", 0.0),
     }
     rango_tickets = f"{corte_x['consecutivo_inicial']}-{corte_x['consecutivo_final']}"
@@ -643,8 +678,9 @@ def generar_formato_corte(
 
     limpiar = [
         "G3", "C5",
-        "E11", "E17", "E22", "E23", "E25", "E26",
-        "E29", "E30", "E32", "E35", "E36", "E38", "E41", "E42", "E44",
+        "E11", "E17", "E22", "E23", "E24", "E25", "E26",
+        "E29", "E30", "E31", "E32", "E35", "E36", "E37", "E38",
+        "E41", "E42", "E43", "E44",
         "C53",
         *[f"C{fila}" for fila in range(58, 69)],
         *[f"E{fila}" for fila in range(58, 69)],
@@ -1288,7 +1324,14 @@ def mostrar_arqueo_caja(
     with st.form("form_nuevo_voucher", clear_on_submit=True):
         col1, col2, col3 = st.columns([2, 1, 2])
         with col1:
-            medio = st.selectbox("Medio de pago", MEDIOS_CAPTURA, disabled=bloquear_arqueo)
+            medio = st.selectbox(
+                "Medio de pago", MEDIOS_CAPTURA, disabled=bloquear_arqueo,
+                # Conservamos la clave histórica de AMEX para jornadas guardadas.
+                format_func=lambda valor: {
+                    "TC AMERICAN EXPRESS": "TC AMERICAN EXPRESS - AFIRME",
+                    "TC AMERICAN EXPRESS - KUSHKI": "TC AMERICAN EXPRESS - KUSHKI / iCash",
+                }.get(valor, valor),
+            )
         with col2:
             importe = st.number_input(
                 "Importe", min_value=0.0, value=None, step=0.01,
