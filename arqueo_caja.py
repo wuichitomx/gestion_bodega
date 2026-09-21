@@ -1183,9 +1183,9 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
                 st.warning("Gmail creó el borrador, pero no se confirmó su registro. Revísalo en Gmail antes de reintentar.")
                 return
             st.success("Borrador preparado en Gmail. Revísalo allí antes de enviarlo.")
-        except Exception:
-            st.error("No se pudo confirmar el borrador. Revisa Gmail antes de reintentar para evitar duplicados; "
-                     "comprueba también la autorización de la cuenta. No se envió ningún correo desde esta función.")
+        except Exception as ex:
+            st.error("No se pudo confirmar el borrador.")
+            st.error(f"Detalle técnico: {type(ex).__name__}: {ex}")
     if ya_preparado:
         st.success("Esta versión ya tiene un borrador preparado en Gmail durante esta sesión.")
     st.caption("Al cambiar adjuntos se actualiza el mismo borrador durante esta sesión. "
