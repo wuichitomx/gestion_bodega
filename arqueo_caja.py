@@ -611,6 +611,19 @@ def actualizar_facturacion_corte(contenido, fecha_trabajo, corte_x, facturacion)
     return _editar_ooxml(contenido, {hoja: cambios}, {hoja: limpiar})
 
 
+def actualizar_responsable_corte(contenido, fecha_trabajo, responsable):
+    """Actualiza sólo el nombre de ELABORÓ (D82) en la copia del Corte usada para el correo."""
+    nombre = _texto_limpio(responsable)
+    if not nombre:
+        raise ValueError("El usuario que prepara el correo no tiene nombre configurado.")
+    hoja = f"{fecha_trabajo.day:02d}"
+    return _editar_ooxml(
+        contenido,
+        {hoja: {"D82": nombre}},
+        limpiar_por_hoja={hoja: ["D82"]},
+    )
+
+
 def generar_formato_corte(
     fecha_trabajo,
     corte_x,
@@ -1118,7 +1131,23 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
         st.success("Documentación y facturación aplicada verificadas para esta jornada.")
     st.markdown("##### Vista previa del correo")
     st.text(f"Para: {CORREO_PARA}\nCC: {CORREO_CC}\nAsunto: Venta {fecha_trabajo:%d-%m-%Y}\n\n{CORREO_CUERPO}\n\n{firma}")
-    adjuntos = [(f"Corte_de_Caja_{fecha_trabajo:%Y-%m-%d}.xlsx", documentos.get("corte")),
+
+    # La carátula que viaja en el correo debe identificar a quien prepara el correo,
+    # sin alterar el responsable histórico del arqueo ni invalidar la revisión de Drive.
+    responsable_correo = _texto_limpio(
+        operador.get("nombre_completo") or operador.get("username")
+    )
+    corte_correo = documentos.get("corte")
+    if corte_correo and puede_correo:
+        try:
+            corte_correo = actualizar_responsable_corte(
+                corte_correo, fecha_trabajo, responsable_correo
+            )
+            st.caption(f"Carátula del correo: ELABORÓ — {responsable_correo}")
+        except ValueError as ex:
+            errores.append(str(ex))
+
+    adjuntos = [(f"Corte_de_Caja_{fecha_trabajo:%Y-%m-%d}.xlsx", corte_correo),
                 (f"Estadillo_{fecha_trabajo:%Y-%m-%d}.xlsm", documentos.get("estadillo"))] + externos
     for nombre, contenido in adjuntos:
         st.text(f"{nombre} — {len(contenido or b'') / 1024:.1f} KB")
