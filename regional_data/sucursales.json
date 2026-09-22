@@ -1,0 +1,19 @@
+[
+  {"codigo":"Z1GEX","nombre":"BCS MORELIA","ciudad":"Morelia","estado":"Michoacán","cve_ent":"16"},
+  {"codigo":"Z1CFF","nombre":"ORIGINALS AMERICAS","ciudad":null,"estado":null,"cve_ent":null},
+  {"codigo":"Z1GKN","nombre":"BCS SAN LUIS POTOSI","ciudad":"San Luis Potosí","estado":"San Luis Potosí","cve_ent":"24"},
+  {"codigo":"Z1CZH","nombre":"ALTARIA AGUASCALIENTES","ciudad":"Aguascalientes","estado":"Aguascalientes","cve_ent":"01"},
+  {"codigo":"Z1F67","nombre":"AMBAR TUXTLA","ciudad":"Tuxtla Gutiérrez","estado":"Chiapas","cve_ent":"07"},
+  {"codigo":"Z1FYJ","nombre":"GALERIAS METEPEC","ciudad":"Metepec","estado":"Estado de México","cve_ent":"15"},
+  {"codigo":"Z1GPN","nombre":"OCS PASEO QUERETARO","ciudad":"Querétaro","estado":"Querétaro","cve_ent":"22"},
+  {"codigo":"Z1IQF","nombre":"BCS ALTOZANO","ciudad":null,"estado":null,"cve_ent":null},
+  {"codigo":"Z1CZ5","nombre":"ALTABRISA VILLAHERMOSA","ciudad":"Villahermosa","estado":"Tabasco","cve_ent":"27"},
+  {"codigo":"Z1E43","nombre":"AMÉRICAS ECATEPEC","ciudad":"Ecatepec","estado":"Estado de México","cve_ent":"15"},
+  {"codigo":"Z1CZ4","nombre":"ALTABRISA MERIDA","ciudad":"Mérida","estado":"Yucatán","cve_ent":"31"},
+  {"codigo":"Z1GKM","nombre":"ORIGINALS PUNTO SUR","ciudad":null,"estado":null,"cve_ent":null},
+  {"codigo":"Z1GKP","nombre":"TOWN SQUARE","ciudad":null,"estado":null,"cve_ent":null},
+  {"codigo":"Z1CZG","nombre":"AVERANDA CUERNAVACA","ciudad":"Cuernavaca","estado":"Morelos","cve_ent":"17"},
+  {"codigo":"Z1GPP","nombre":"BCS BELLA OAXACA","ciudad":"Oaxaca de Juárez","estado":"Oaxaca","cve_ent":"20"},
+  {"codigo":"Z1G7M","nombre":"ORIGINALS TEPIC","ciudad":"Tepic","estado":"Nayarit","cve_ent":"18"},
+  {"codigo":"Z1H4Q","nombre":"YACS KIDS MERIDA","ciudad":"Mérida","estado":"Yucatán","cve_ent":"31"}
+]

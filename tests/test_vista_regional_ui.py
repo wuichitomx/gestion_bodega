@@ -1,0 +1,46 @@
+"""Pruebas locales de widgets; no inicia la app autenticada ni llama a Supabase."""
+import os
+from pathlib import Path
+import unittest
+import math
+
+from streamlit.testing.v1 import AppTest
+
+
+class VistaTests(unittest.TestCase):
+    def test_sin_archivo(self):
+        app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "vista_regional.py")).run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.dataframe[0].value), 17)
+
+    @unittest.skipUnless(os.environ.get("REGIONAL_EXCEL_REAL"), "Requiere Excel real local")
+    def test_archivo_real_y_navegacion(self):
+        app = AppTest.from_string('''
+import io, os
+from pathlib import Path
+from unittest.mock import patch
+from vista_regional import mostrar_vista_regional
+archivo = io.BytesIO(Path(os.environ['REGIONAL_EXCEL_REAL']).read_bytes())
+archivo.name = 'RpVtas_Extracto_Almacen.xlsx'
+with patch('streamlit.file_uploader', return_value=archivo):
+    mostrar_vista_regional()
+''', default_timeout=30).run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.metric), 4)
+        self.assertEqual(len(app.dataframe[1].value), 17)
+        app.selectbox(key="regional_estado").select("Yucatán").run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.dataframe[1].value), 2)
+        app.selectbox(key="regional_tienda").select("Z1H4Q").run()
+        self.assertEqual(app.subheader[-1].value, "YACS KIDS MERIDA")
+        app.selectbox(key="regional_estado").select("Ubicación pendiente").run()
+        self.assertEqual(len(app.dataframe[1].value), 4)
+        app.selectbox(key="regional_estado").select("Oaxaca").run()
+        self.assertTrue(math.isnan(app.dataframe[1].value.iloc[0]["Venta x Mt2"]))
+        app.selectbox(key="regional_estado").select("Sonora").run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn("no tiene sucursales", app.info[0].value)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1801,6 +1801,7 @@ paginas_admin = {
     "📊 Operación": [
         "💵 Arqueo de caja",
         "📊 Dashboard",
+        "🌎 Vista Regional",
         "📈 Resumen PV",
         "📐 Rendimiento m²",
     ],
@@ -1849,6 +1850,13 @@ with st.sidebar:
             options=opciones_usuario,
             key="pagina_menu_usuario",
         )
+
+if pagina_actual == "🌎 Vista Regional":
+    if not st.session_state.es_admin:
+        st.error("Vista Regional requiere acceso de administrador.")
+        st.stop()
+    from vista_regional import mostrar_vista_regional
+    mostrar_vista_regional()
 
 if pagina_actual == "💵 Arqueo de caja":
     if not permisos_actuales & OPERATIVOS:
