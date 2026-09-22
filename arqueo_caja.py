@@ -1174,7 +1174,16 @@ def _mostrar_correo_informacion(estado, fecha_trabajo, cargar_corte, cargar_esta
             if not _guardar_cambio(estado, repositorio, "preparar_correo"):
                 return
             estado = copy.deepcopy(st.session_state.arqueo_caja)
-            resultado = crear_borrador(eml, borrador_id=anterior.get("id"))
+            from googleapiclient.errors import HttpError
+
+            try:
+                resultado = crear_borrador(eml, borrador_id=anterior.get("id"))
+            except HttpError as error:
+                # Solo recuperar una actualización de un borrador que ya no existe.
+                # No reintentar creaciones ni otros errores con resultado incierto.
+                if not anterior.get("id") or error.resp.status != 404:
+                    raise
+                resultado = crear_borrador(eml, borrador_id=None)
             if not resultado or not resultado.get("id"):
                 raise ValueError("Gmail no confirmó el borrador.")
             st.session_state[clave + "_draft"] = {"id": resultado["id"], "huella": huella}
