@@ -308,10 +308,21 @@ def mostrar_dashboard(visibles, region):
 
 def mostrar_vista_regional(repositorio=None):
     import streamlit as st
+    from regional_yoy import mostrar_year_to_year
+
+    st.header("🌎 Vista Regional")
+    actual, yoy = st.tabs(["📊 Actual", "📈 Year to Year"])
+    with actual:
+        mostrar_actual_regional(repositorio)
+    with yoy:
+        mostrar_year_to_year()
+
+
+def mostrar_actual_regional(repositorio=None):
+    import streamlit as st
     import altair as alt
     from regional_persistencia import ErrorRegional
 
-    st.header("🌎 Vista Regional")
     if repositorio is None:
         st.info("Abre Vista Regional desde Sinapsis para consultar o actualizar el reporte compartido.")
         return
