@@ -26,7 +26,7 @@ def variacion(actual, anterior, documentos):
 
 def comparar(actual, anterior, solo_comparables=False):
     """Unión exacta por código; no interpreta nombres ni empareja aperturas."""
-    comunes = set(actual.codigo) & set(anterior.codigo)
+    comunes = set(actual.codigo) & set(anterior.loc[anterior["# Doc"].ge(MIN_DOCUMENTOS), "codigo"])
     a = actual[actual.codigo.isin(comunes)] if solo_comparables else actual
     b = anterior[anterior.codigo.isin(comunes)] if solo_comparables else anterior
     ra, rb = resumen(a), resumen(b)
@@ -108,15 +108,19 @@ def mostrar_comparativo(actual, anterior):
     import streamlit as st
 
     comunes = set(actual.codigo) & set(anterior.codigo)
-    st.caption(f"Tiendas: actual {len(actual)} · anterior {len(anterior)} · códigos comunes {len(comunes)}")
+    _, todas = comparar(actual, anterior)
+    st.caption(f"Tiendas: actuales {len(actual)} · anteriores {len(anterior)} · códigos comunes {len(comunes)}")
     lectura = st.radio("Lectura", ["Región total", "Tiendas comparables"], horizontal=True, key="yoy_lectura")
     comparables = lectura == "Tiendas comparables"
-    st.caption("Solo códigos presentes en ambos reportes. Coincidencia por código no garantiza operación durante todo el periodo."
-               if comparables else "Todos los almacenes de cada reporte, incluyendo altas y ausencias.")
+    st.caption(f"Solo códigos presentes en ambos reportes con al menos {MIN_DOCUMENTOS} documentos anteriores. "
+               "Coincidencia por código no garantiza operación durante todo el periodo."
+               if comparables else "Totales: todos los almacenes de cada año. Tabla: todas las tiendas actuales, incluyendo nuevas y con base insuficiente.")
     if comparables and not comunes:
         st.info("No hay códigos comunes entre los reportes.")
         return
     regional, tiendas = comparar(actual, anterior, comparables)
+    ausentes = todas[todas.Estado.eq("Sin dato actual")]
+    tiendas = tiendas[tiendas.codigo.isin(actual.codigo)]
     for inicio in (0, 4):
         for col, (_, fila) in zip(st.columns(4), regional.iloc[inicio:inicio + 4].iterrows()):
             kpi = fila.KPI
@@ -132,8 +136,11 @@ def mostrar_comparativo(actual, anterior):
     st.subheader("Comparativo por sucursal")
     kpi = st.selectbox("KPI del ranking YoY", KPIS, key="yoy_kpi")
     datos = ranking(tiendas, kpi)
+    st.caption(f"{lectura}: {len(datos)} tiendas en la tabla. "
+               f"Gráfica: {datos.Cambio.notna().sum()} tiendas con YoY calculable de {len(actual)} actuales ({kpi}).")
     st.caption(f"Base insuficiente: menos de {MIN_DOCUMENTOS} documentos en el año anterior o KPI base ≤ 0. "
-               "Sus importes se conservan en los totales y tablas; se omiten del ranking porcentual. "
+               "Región total conserva sus importes; Tiendas comparables excluye las bases con menos de 30 documentos. "
+               "La gráfica solo incluye cambios calculables para el KPI seleccionado. "
                "N/D indica que no se puede calcular una comparación.")
     if kpi == "% Dcto":
         st.caption("El descuento se compara en puntos porcentuales; un aumento no implica mejor desempeño.")
@@ -158,6 +165,9 @@ def mostrar_comparativo(actual, anterior):
                 for c in tabla.columns if c not in ("Código", "Tienda", "Estado del KPI")}
     st.dataframe(tabla.style.format(formatos, na_rep="N/D"), hide_index=True, width="stretch")
     st.caption("Haz clic en los encabezados para ordenar. Los datos ausentes no se convierten en cero.")
+    if not ausentes.empty:
+        st.caption("Sin dato actual (solo año anterior, fuera de la tabla principal): " + "; ".join(
+            f"{r.codigo} · {r.Tienda}" for _, r in ausentes.iterrows()))
 
 
 def mostrar_year_to_year():
@@ -200,7 +210,8 @@ def mostrar_year_to_year():
                  "ATV = Σ Venta / Σ # Doc; ASP = Σ Venta / Σ Unidades; % Dcto = Σ Descuento / Σ Venta Bruta. "
                  "Venta Neta se toma del ERP. No se promedian ratios individuales. "
                  "YoY = (actual − anterior) / anterior. Denominadores no positivos: N/D. "
-                 "Los códigos comunes con base insuficiente permanecen en el agregado comparable.")
+                 "Tiendas comparables filtra ambos agregados a códigos comunes con al menos 30 documentos anteriores. "
+                 "La disponibilidad del YoY de cada KPI depende además de su base y denominadores.")
         for rol, (_, control, _, _) in zip(("Actual", "Anterior"), reportes):
             st.write(rol)
             st.dataframe(control, hide_index=True, width="stretch")

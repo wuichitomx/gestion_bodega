@@ -38,9 +38,9 @@ class ComparacionTests(unittest.TestCase):
         self.assertEqual(t.loc["X", "Estado"], "Sin dato actual")
         self.assertEqual(t.loc["A", "Venta YoY %"], 1)
         region, tiendas = comparar(a, b, True)
-        self.assertEqual(set(tiendas.codigo), {"A", "B"})
-        self.assertEqual(region.set_index("KPI").loc["Venta", "Anterior"], 102)
-        self.assertAlmostEqual(region.set_index("KPI").loc["UPT", "Actual"], 160 / 90)
+        self.assertEqual(set(tiendas.codigo), {"A"})
+        self.assertEqual(region.set_index("KPI").loc["Venta", "Anterior"], 100)
+        self.assertAlmostEqual(region.set_index("KPI").loc["UPT", "Actual"], 60 / 40)
 
     def test_cero_negativos_y_umbral(self):
         for base in (0, -1, float("nan")):
@@ -78,11 +78,13 @@ class ArchivosRealesTests(unittest.TestCase):
         self.assertEqual([len(f) for f in fuentes], [17, 15])
         comunes = set(fuentes[0]) & set(fuentes[1])
         self.assertEqual(len(comunes), 14)
+        suficientes = {c for c in comunes if float(fuentes[1][c][5]) >= 30}
+        self.assertEqual(len(suficientes), 13)
         for comparable in (False, True):
             region, tiendas = comparar(*leidos, comparable)
             esperados = []
             for fuente in fuentes:
-                filas = [r for c, r in fuente.items() if not comparable or c in comunes]
+                filas = [r for c, r in fuente.items() if not comparable or c in suficientes]
                 docs, uds, bruta, dcto, venta, neta = [sum(float(r[i]) for r in filas) for i in (5, 6, 7, 8, 10, 15)]
                 esperados.append([venta, neta, uds, docs, uds/docs, venta/docs, venta/uds, dcto/bruta])
             for i, k in enumerate(KPIS):
@@ -90,10 +92,14 @@ class ArchivosRealesTests(unittest.TestCase):
                 self.assertAlmostEqual(row.Actual, esperados[0][i], places=6)
                 self.assertAlmostEqual(row.Anterior, esperados[1][i], places=6)
                 self.assertAlmostEqual(row["YoY %"], esperados[0][i]/esperados[1][i]-1, places=8)
-            bella = tiendas.set_index("codigo").loc["Z1GPP"]
-            self.assertEqual(bella.Estado, "Base insuficiente")
-            self.assertEqual(bella["# Doc anterior"], 2)
-            self.assertTrue(math.isnan(bella["Venta YoY %"]))
+            if comparable:
+                self.assertEqual(set(tiendas.codigo), suficientes)
+            else:
+                self.assertEqual(len(tiendas[tiendas.codigo.isin(leidos[0].codigo)]), 17)
+                bella = tiendas.set_index("codigo").loc["Z1GPP"]
+                self.assertEqual(bella.Estado, "Base insuficiente")
+                self.assertEqual(bella["# Doc anterior"], 2)
+                self.assertTrue(math.isnan(bella["Venta YoY %"]))
 
 
 class UITests(unittest.TestCase):
@@ -156,13 +162,31 @@ mostrar_comparativo(leer_reporte(os.environ['YOY_ACTUAL'])[0], leer_reporte(os.e
 ''', default_timeout=30).run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.metric), 8)
-        self.assertEqual(len(app.dataframe[0].value), 18)
+        app.selectbox(key="yoy_kpi").select("Venta Neta").run()
+        tabla = app.dataframe[0].value.set_index("Código")
+        self.assertEqual(len(tabla), 17)
+        self.assertNotIn("Z1GEY", tabla.index)
+        self.assertEqual(tabla.loc["Z1GPP", "Estado del KPI"], "Base insuficiente")
+        self.assertGreater(tabla.loc["Z1GPP", "Venta Neta actual"], 0)
+        self.assertGreater(tabla.loc["Z1GPP", "Venta Neta anterior"], 0)
+        for codigo in ("Z1GKP", "Z1H4Q", "Z1IQF"):
+            self.assertEqual(tabla.loc[codigo, "Estado del KPI"], "Nueva / sin base comparable")
+            self.assertTrue(math.isnan(tabla.loc[codigo, "Venta Neta YoY %"]))
+        self.assertTrue(math.isnan(tabla.loc["Z1GPP", "Venta Neta YoY %"]))
+        self.assertTrue(any("13 tiendas con YoY calculable de 17 actuales" in c.value for c in app.caption))
+        self.assertTrue(any("Z1GEY" in c.value and "Sin dato actual" in c.value for c in app.caption))
+        total_neta = app.metric[1].value
         app.radio(key="yoy_lectura").set_value("Tiendas comparables").run()
-        self.assertEqual(len(app.dataframe[0].value), 14)
+        self.assertEqual(len(app.dataframe[0].value), 13)
+        self.assertNotEqual(app.metric[1].value, total_neta)
+        self.assertNotIn("Z1GPP", set(app.dataframe[0].value["Código"]))
         for kpi in KPIS:
             app.selectbox(key="yoy_kpi").select(kpi).run()
             self.assertEqual(len(app.exception), 0, kpi)
             self.assertEqual(len(app.get("vega_lite_chart")), 1)
+        app.radio(key="yoy_lectura").set_value("Región total").run()
+        self.assertEqual(len(app.dataframe[0].value), 17)
+        self.assertEqual(app.metric[1].value, total_neta)
 
 
 if __name__ == "__main__":
