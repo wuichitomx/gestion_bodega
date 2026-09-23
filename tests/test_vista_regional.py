@@ -6,7 +6,7 @@ import unittest
 
 from openpyxl import Workbook, load_workbook
 from vista_regional import (ADITIVOS, catalogo, codigo, datos_mapa, estado_seleccionado,
-                           filtrar_estado, leer_reporte, numero, referencia_regional)
+                           filtrar_estado, grafica_kpi, leer_reporte, numero, referencia_regional)
 
 
 def libro(filas, total=True):
@@ -62,13 +62,33 @@ class LectorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicado"):
             leer_reporte(libro([{"codigo": "x"}, {"codigo": " X "}]))
 
+    def test_graficas_referencia_completa_y_nd(self):
+        d, _, _, _ = leer_reporte(libro([
+            {"codigo": "Z1GEX", "Venta": 100, "Unidades": 2, "# Doc": 1},
+            {"codigo": "Z1GPP", "Venta": 900, "Unidades": 18, "# Doc": 3, "Mt2": 0}]))
+        ref = referencia_regional(d)
+        self.assertEqual(ref["ATV"], 250)
+        self.assertEqual(ref["ASP"], 50)
+        for k in ("UPT", "ASP", "ATV", "Venta x Mt2"):
+            spec = grafica_kpi(filtrar_estado(d, "Oaxaca"), k, ref[k]).to_dict()
+            reglas = [v for rows in spec["datasets"].values() for v in rows if "referencia" in v]
+            self.assertEqual(reglas, [{"referencia": ref[k]}])
+            filas = [v for rows in spec["datasets"].values() for v in rows if "etiqueta" in v]
+            self.assertEqual([v["codigo"] for v in filas], ["Z1GPP"])
+            if k == "Venta x Mt2":
+                self.assertEqual(filas[0]["etiqueta"], "N/D")
+                self.assertIsNone(filas[0]["valor"])
+        sin_area = d[d.codigo == "Z1GPP"]
+        spec = grafica_kpi(sin_area, "Venta x Mt2", referencia_regional(sin_area)["Venta x Mt2"]).to_dict()
+        self.assertFalse(any("referencia" in v for rows in spec["datasets"].values() for v in rows))
+
     def test_ausencia_totales_y_catalogo(self):
         d, c, avisos, _ = leer_reporte(libro([{"codigo": "desconocido"}], total=False))
         self.assertTrue(c.empty)
         self.assertIn("No hay fila TOTALES", avisos[0])
         self.assertEqual(d.iloc[0].estado, "Ubicación pendiente")
         self.assertEqual(len(catalogo()), 17)
-        self.assertEqual(catalogo().cve_ent.isna().sum(), 4)
+        self.assertEqual(set(catalogo().loc[catalogo().cve_ent.isna(), "codigo"]), {"Z1CFF", "Z1IQF"})
 
     def test_diferencia_totales_visible(self):
         w = load_workbook(io.BytesIO(libro([{"Venta": 100}])))

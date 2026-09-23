@@ -1,4 +1,4 @@
-"""Lectura y análisis regional aislados: sin persistencia ni servicios externos."""
+    """Lectura y análisis regional aislados: sin persistencia ni servicios externos."""
 from io import BytesIO
 from pathlib import Path
 import json
@@ -211,6 +211,71 @@ def formato(v, porcentaje=False):
     return "N/D" if pd.isna(v) else f"{v:.2%}" if porcentaje else f"{v:,.2f}"
 
 
+def grafica_kpi(visibles, metrica, referencia):
+    """Barras del filtro actual y referencia ya calculada sobre toda la región."""
+    import altair as alt
+
+    datos = visibles.sort_values([metrica, "codigo"], ascending=[False, True], na_position="last").copy()
+    datos["tienda"] = datos["codigo"] + " · " + datos["nombre"]
+    datos["valor"] = datos[metrica]
+    datos["etiqueta"] = datos.valor.map(lambda v: formato(v, metrica == "% Dcto"))
+    # La posición de N/D solo sirve para su texto: nunca dibujar una barra cero.
+    datos["posicion_texto"] = datos.valor.fillna(0)
+    valores = datos.valor.dropna().tolist() + ([referencia] if pd.notna(referencia) else []) + [0]
+    minimo, maximo = min(valores), max(valores)
+    margen = (maximo - minimo) * .24 or 1
+    escala = alt.Scale(domain=[minimo - (margen if minimo < 0 else 0), maximo + margen])
+    base = alt.Chart(datos).encode(
+        y=alt.Y("tienda:N", sort=datos.tienda.tolist(), title=None,
+                axis=alt.Axis(labelLimit=230, labelFontSize=11)),
+        tooltip=[alt.Tooltip("codigo:N", title="Código de Almacén"),
+                 alt.Tooltip("nombre:N", title="Sucursal"),
+                 alt.Tooltip("etiqueta:N", title=metrica)])
+    barras = base.transform_filter("isValid(datum.valor)").mark_bar(cornerRadiusEnd=3).encode(
+        x=alt.X("valor:Q", title=metrica, scale=escala,
+                axis=alt.Axis(format=".0%" if metrica == "% Dcto" else ",.2f")),
+        color=alt.value("#00b8c9"))
+    etiquetas = base.mark_text(align="left", dx=5, color="#767676", fontWeight="bold").encode(
+        x=alt.X("posicion_texto:Q", scale=escala), text="etiqueta:N")
+    grafica = barras + etiquetas
+    if pd.notna(referencia):
+        linea = alt.Chart(pd.DataFrame({"referencia": [referencia]})).mark_rule(
+            color="#e6ae00", strokeDash=[6, 4], strokeWidth=2).encode(
+                x=alt.X("referencia:Q", scale=escala),
+                tooltip=[alt.Tooltip("referencia:Q", title="Promedio regional completo",
+                                     format=".2%" if metrica == "% Dcto" else ",.2f")])
+        grafica = grafica + linea
+    return grafica.properties(height=max(150, len(datos) * 27))
+
+
+def mostrar_dashboard(visibles, region):
+    import streamlit as st
+
+    referencia = referencia_regional(region)
+    st.subheader("Dashboard regional de tiendas")
+    st.caption(f"Comparando {len(visibles)} de {len(region)} sucursales. Línea amarilla: promedio regional "
+               "completo, ponderado según el indicador; incluye todas las tiendas del archivo "
+               "y no cambia con el filtro por estado.")
+    principales = (("UPT", "UPT · Items x Doc."), ("ASP", "ASP · Precio x Unidad"),
+                   ("ATV", "ATV · Venta x Documento"), ("Venta x Mt2", "Rendimiento por m² · Venta x Mt2"))
+    for inicio in (0, 2):
+        for columna, (metrica, titulo) in zip(st.columns(2), principales[inicio:inicio + 2]):
+            with columna:
+                st.metric(titulo + " · Promedio regional", formato(referencia[metrica]))
+                st.altair_chart(grafica_kpi(visibles, metrica, referencia[metrica]), width="stretch")
+                if metrica == "Venta x Mt2":
+                    st.caption(f"Σ Venta / Σ Mt2, solo tiendas con Mt2 > 0: "
+                               f"{int((region.Mt2 > 0).sum())}/{len(region)} comparables. N/D: área inválida.")
+                elif visibles[metrica].isna().any():
+                    st.caption("N/D: denominador no positivo; no comparable.")
+    with st.expander("Indicadores secundarios: Venta, Venta Neta y % Dcto"):
+        metrica = st.selectbox("Indicador secundario", ("Venta", "Venta Neta", "% Dcto"), key="regional_secundario")
+        st.caption("Promedio regional completo: " + formato(referencia[metrica], metrica == "% Dcto") +
+                   (" · Descuento / Venta Bruta; un porcentaje mayor no implica mejor desempeño."
+                    if metrica == "% Dcto" else " · Suma regional / número de sucursales presentes."))
+        st.altair_chart(grafica_kpi(visibles, metrica, referencia[metrica]), width="stretch")
+
+
 def mostrar_vista_regional():
     import streamlit as st
     import altair as alt
@@ -281,12 +346,14 @@ def mostrar_vista_regional():
         st.session_state["regional_estado"] = opciones[0]
     estado = st.selectbox("Estado", opciones, key="regional_estado")
     visibles = filtrar_estado(df, estado)
-    pendientes = df[df.cve_ent.isna()]
+    pendientes = df[df.cve_ent.isna() | df.estado.eq("Ubicación pendiente") | df.ciudad.eq("Por confirmar")]
     if len(pendientes):
-        st.warning("Ubicación pendiente: " + ", ".join(pendientes.nombre) + ". Se incluyen en los resultados regionales.")
+        st.warning("Ubicación pendiente: " + "; ".join(pendientes.codigo + " · " + pendientes.nombre) +
+                   ". Se incluyen en los resultados regionales. Confirmar ciudad y estado por Código de Almacén.")
     if visibles.empty:
         st.info("Este estado no tiene sucursales ubicadas en el archivo cargado.")
         return
+    mostrar_dashboard(visibles, df)
     st.subheader("Ranking de sucursales")
     metrica = st.selectbox("Ordenar de mayor a menor", METRICAS, key="regional_orden")
     ranking = visibles.sort_values([metrica, "codigo"], ascending=[False, True], na_position="last")

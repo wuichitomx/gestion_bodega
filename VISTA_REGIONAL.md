@@ -1,6 +1,7 @@
-# Vista Regional — prototipo local
+# Vista Regional — dashboard de tiendas
 
-Rama `codex/vista-regional`, creada desde `main` en `15034448a3541cca1cb2b37597155b2b689817d9`.
+Prototipo original `bec0ad1`, creado desde `main` en `15034448a3541cca1cb2b37597155b2b689817d9` e integrado en `desarrollo`. La continuación del 22/09/2026 se realizó únicamente en `desarrollo`.
+Antes de editar se comprobaron estado limpio, historial y referencias remotas: `desarrollo=bec0ad1`, `main=1503444`. Ya existían lector, catálogo, mapa, ranking, detalle y referencias ponderadas; no había dashboard comparativo ni cambios sin guardar de esa iteración.
 No requiere SQL, Supabase adicional, cambios de autenticación ni servicios de mapas en ejecución.
 
 ## Probar
@@ -60,14 +61,24 @@ UPT regional: 1.5630693; ATV: 2,111.2921569; ASP: 1,350.7348183; descuento: 7.51
 
 ## Catálogo y mapa
 
-El catálogo de 17 almacenes se identifica por Código de Almacén y conserva nombres del archivo. Quedan **ciudad y estado pendientes**:
+El catálogo de 17 almacenes está separado en `regional_data/sucursales.json`, se identifica por Código de Almacén y conserva nombres del archivo. Al iniciar esta continuación faltaban ciudad y estado en cuatro tiendas. Resultado:
 
-- Z1CFF — ORIGINALS AMERICAS
-- Z1IQF — BCS ALTOZANO
-- Z1GKM — ORIGINALS PUNTO SUR
-- Z1GKP — TOWN SQUARE
+- Z1CFF — ORIGINALS AMERICAS: pendiente; “Américas” no identifica una plaza inequívoca.
+- Z1IQF — BCS ALTOZANO: pendiente; confirmar si corresponde a Paseo Altozano, Morelia. El nombre abreviado no permite certificar esa relación interna.
+- Z1GKM — ORIGINALS PUNTO SUR: Tlajomulco de Zúñiga, Jalisco, clave estatal 14. Ubicación de la plaza respaldada por su [directorio oficial](https://puntosurgdl.com/directorio/) y por el [localizador adidas de Punto Sur](https://www.adidas.mx/stores/mexico/tlajomulco/av-punto-sur-312-c-c-punto-sur-ln19/9990176120).
+- Z1GKP — TOWN SQUARE: Metepec, Estado de México, clave estatal 15; [directorio oficial de Adidas en Town Square Metepec](https://townsquaremetepec.com/products/adidas).
 
-Las otras ubicaciones se deducen de ciudades explícitas en el nombre comercial; requieren confirmación del catálogo de negocio y no representan direcciones verificadas. El mapa agrega por estado, nunca sitúa marcadores de tiendas. Las cuatro pendientes participan en el total regional y pueden consultarse mediante “Ubicación pendiente”. Los estados sin tiendas del archivo aparecen grises, no como evidencia de venta cero regional.
+Fuentes consultadas el 22/09/2026. La asociación de las dos plazas al código se basa en el nombre del reporte; los directorios públicos no publican códigos ERP. No se asignan direcciones ni coordenadas de tienda. Para resolver las dos pendientes, confirmar ciudad/estado por código y actualizar únicamente el registro correspondiente del JSON con su `cve_ent`. La app lo relee al ejecutar la vista.
+
+Las trece ubicaciones originales se deducen de ciudades explícitas en el nombre comercial; requieren confirmación del catálogo de negocio y no representan direcciones verificadas. El mapa agrega por estado, nunca sitúa marcadores de tiendas. Las dos pendientes participan en el total regional y pueden consultarse mediante “Ubicación pendiente”. Los estados sin tiendas del archivo aparecen grises, no como evidencia de venta cero regional.
+
+## Dashboard comparativo
+
+Debajo del mapa y del selector estatal aparecen cuatro tarjetas con referencias regionales y gráficas de barras horizontales: UPT (Items x Doc.), ASP (Precio x Unidad), ATV (Venta x Documento) y rendimiento por m² (Venta x Mt2). En pantallas amplias se distribuyen en dos columnas; las barras se ordenan por valor y muestran código, tienda y cifra. Una línea amarilla punteada marca la referencia completa. Un panel desplegable permite comparar Venta, Venta Neta y % Dcto. El ranking y el detalle originales permanecen debajo.
+
+Las fórmulas conservan la sección Indicadores: UPT = Σ Unidades / Σ Docs; ASP = Σ Venta / Σ Unidades; ATV = Σ Venta / Σ Docs; rendimiento = Σ Venta de tiendas con Mt2 > 0 / Σ Mt2 de esas mismas tiendas. Los promedios de Venta y Venta Neta son sumas / sucursales presentes; % Dcto = Σ Descuento / Σ Venta Bruta. El filtro estatal solo afecta las barras; tarjetas y líneas mantienen toda la región. N/D conserva la fila y una etiqueta, sin dibujar una barra cero. Si toda la región carece de denominador válido, se muestra referencia N/D y se omite su línea.
+
+Prueba manual: cargar el archivo en Vista Regional; comprobar 17 tiendas, UPT 1.56, ASP 1,350.73, ATV 2,111.29 y rendimiento 3,414.77. Filtrar Yucatán: dos tiendas y las mismas referencias. Filtrar Oaxaca: Bella Oaxaca sin barra de rendimiento, etiqueta N/D y referencia regional 3,414.77. “Ubicación pendiente” debe listar Z1CFF y Z1IQF. Verificar también el selector de indicadores secundarios y conservar el ranking/detalle.
 
 Límites públicos: **INEGI, Marco Geoestadístico, diciembre de 2025**, descargados mediante el [servicio oficial de información vectorial](https://www.inegi.org.mx/servicios/catalogounico.html), `https://gaia.inegi.org.mx/wscatgeo/v2/geo/mgee/{01..32}`. Se conserva atribución conforme a los [términos del INEGI](https://www.inegi.org.mx/inegi/terminos.html). Consulta manual realizada el 21–22 de septiembre de 2026. Los metadatos de origen indican coordenadas geográficas EPSG:6365; para esta escala visual se representan en la proyección Mercator del gráfico, sin uso de precisión geodésica.
 
@@ -85,3 +96,7 @@ Sin esa variable, las pruebas que necesitan el Excel privado se omiten explícit
 La suite completa ejecutó 61 pruebas: 57 correctas y cuatro errores `BadZipFile` en `CorreoFlujoTests` (Caja). Sus simulaciones entregan `b'corte'` como si fuera un XLSX a la edición OOXML; tanto ese módulo como sus pruebas están idénticos a `main`. Se documentan sin modificar el área excluida. Las diez pruebas regionales pasaron.
 
 Revisión visual local realizada con el archivo real mediante un arnés de carga fuera del repositorio: mapa completo de México con entidades grises/coloreadas, clic real en Yucatán reflejado en el selector y detalle de Altabrisa Mérida. Se corrigieron la conservación de geometrías anidadas y su orientación para Vega/D3. La revisión es del módulo regional aislado; no se abrió la sesión autenticada de producción. Las tablas anchas permiten desplazamiento horizontal en ventanas pequeñas.
+
+### Validación de la continuación (22/09/2026)
+
+Las 11 pruebas regionales pasaron con el Excel real disponible en esta sesión, incluidas navegación de widgets, cocientes de sumas, exclusión de TOTALES, N/D y referencia completa en gráficas filtradas. La compilación de los tres archivos Python modificados y `git diff --check` pasaron. Los hashes de las dos plantillas privadas permanecieron idénticos. Se revisó el dashboard aislado en navegador local; esto no verifica el despliegue ni la sesión autenticada de Streamlit Cloud. El intento de guardar el commit local fue bloqueado por permiso denegado al crear .git/worktrees/Sinapsis/index.lock. Los cinco archivos modificados permanecen en desarrollo sin stage ni commit; no hubo push ni merge a main. Se requiere guardar el commit desde PowerShell habitual o GitHub Desktop con acceso al repositorio.
