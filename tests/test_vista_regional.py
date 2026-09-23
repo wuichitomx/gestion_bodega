@@ -74,10 +74,7 @@ class LectorTests(unittest.TestCase):
             reglas = [v for rows in spec["datasets"].values() for v in rows if "referencia" in v]
             self.assertEqual(reglas, [{"referencia": ref[k]}])
             filas = [v for rows in spec["datasets"].values() for v in rows if "etiqueta" in v]
-            self.assertEqual([v["codigo"] for v in filas], ["Z1GPP"])
-            if k == "Venta x Mt2":
-                self.assertEqual(filas[0]["etiqueta"], "N/D")
-                self.assertIsNone(filas[0]["valor"])
+            self.assertEqual([v["codigo"] for v in filas], [] if k == "Venta x Mt2" else ["Z1GPP"])
         sin_area = d[d.codigo == "Z1GPP"]
         spec = grafica_kpi(sin_area, "Venta x Mt2", referencia_regional(sin_area)["Venta x Mt2"]).to_dict()
         self.assertFalse(any("referencia" in v for rows in spec["datasets"].values() for v in rows))
@@ -88,7 +85,12 @@ class LectorTests(unittest.TestCase):
         self.assertIn("No hay fila TOTALES", avisos[0])
         self.assertEqual(d.iloc[0].estado, "Ubicación pendiente")
         self.assertEqual(len(catalogo()), 17)
-        self.assertEqual(set(catalogo().loc[catalogo().cve_ent.isna(), "codigo"]), {"Z1CFF", "Z1IQF"})
+        self.assertFalse(catalogo().cve_ent.isna().any())
+        ubicaciones = catalogo().set_index("codigo")
+        for cod in ("Z1CFF", "Z1IQF"):
+            self.assertEqual(ubicaciones.loc[cod, "estado"], "Michoacán")
+        self.assertEqual(ubicaciones.loc["Z1GKM", "estado"], "Jalisco")
+        self.assertEqual(ubicaciones.loc["Z1GKP", "estado"], "Estado de México")
 
     def test_diferencia_totales_visible(self):
         w = load_workbook(io.BytesIO(libro([{"Venta": 100}])))
@@ -99,7 +101,7 @@ class LectorTests(unittest.TestCase):
         self.assertIn("diferencias", a[0])
 
     def test_navegacion_estado(self):
-        d, _, _, _ = leer_reporte(libro([{"codigo": "Z1GEX"}, {"codigo": "Z1CFF"}]))
+        d, _, _, _ = leer_reporte(libro([{"codigo": "Z1GEX"}, {"codigo": "DESCONOCIDO"}]))
         self.assertEqual(len(filtrar_estado(d, "Toda la región")), 2)
         self.assertEqual(filtrar_estado(d, "Michoacán").iloc[0].codigo, "Z1GEX")
         self.assertEqual(len(filtrar_estado(d, "Ubicación pendiente")), 1)
@@ -130,6 +132,14 @@ class LectorTests(unittest.TestCase):
         self.assertEqual(d["# Doc"].sum(), 6477)
         self.assertAlmostEqual(referencia_regional(d)["Venta x Mt2"], 3414.77412693906)
         self.assertTrue(math.isnan(d.set_index("codigo").loc["Z1GPP", "Venta x Mt2"]))
+        for metrica in ("UPT", "ATV", "ASP", "Venta x Mt2"):
+            spec = grafica_kpi(d, metrica, referencia_regional(d)[metrica]).to_dict()
+            filas = [v for rows in spec["datasets"].values() for v in rows if "etiqueta" in v]
+            self.assertEqual(len(filas), 16 if metrica == "Venta x Mt2" else 17)
+            self.assertEqual([v["valor"] for v in filas], sorted([v["valor"] for v in filas], reverse=True))
+            self.assertNotIn("TOTALES", [v["codigo"] for v in filas])
+            if metrica == "Venta x Mt2":
+                self.assertNotIn("Z1GPP", [v["codigo"] for v in filas])
         w = load_workbook(p, data_only=True)
         for r in list(w.active.values)[3:20]:
             fila = d.set_index("codigo").loc[r[3]]

@@ -1,4 +1,4 @@
-    """Lectura y análisis regional aislados: sin persistencia ni servicios externos."""
+"""Lectura y análisis regional aislados: sin persistencia ni servicios externos."""
 from io import BytesIO
 from pathlib import Path
 import json
@@ -215,7 +215,8 @@ def grafica_kpi(visibles, metrica, referencia):
     """Barras del filtro actual y referencia ya calculada sobre toda la región."""
     import altair as alt
 
-    datos = visibles.sort_values([metrica, "codigo"], ascending=[False, True], na_position="last").copy()
+    comparables = visibles[visibles.Mt2 > 0] if metrica == "Venta x Mt2" else visibles
+    datos = comparables.sort_values([metrica, "codigo"], ascending=[False, True], na_position="last").copy()
     datos["tienda"] = datos["codigo"] + " · " + datos["nombre"]
     datos["valor"] = datos[metrica]
     datos["etiqueta"] = datos.valor.map(lambda v: formato(v, metrica == "% Dcto"))
@@ -227,7 +228,7 @@ def grafica_kpi(visibles, metrica, referencia):
     escala = alt.Scale(domain=[minimo - (margen if minimo < 0 else 0), maximo + margen])
     base = alt.Chart(datos).encode(
         y=alt.Y("tienda:N", sort=datos.tienda.tolist(), title=None,
-                axis=alt.Axis(labelLimit=230, labelFontSize=11)),
+                axis=alt.Axis(labelLimit=350, labelFontSize=12)),
         tooltip=[alt.Tooltip("codigo:N", title="Código de Almacén"),
                  alt.Tooltip("nombre:N", title="Sucursal"),
                  alt.Tooltip("etiqueta:N", title=metrica)])
@@ -235,14 +236,14 @@ def grafica_kpi(visibles, metrica, referencia):
         x=alt.X("valor:Q", title=metrica, scale=escala,
                 axis=alt.Axis(format=".0%" if metrica == "% Dcto" else ",.2f")),
         color=alt.value("#00b8c9"))
-    etiquetas = base.mark_text(align="left", dx=5, color="#767676", fontWeight="bold").encode(
+    etiquetas = base.mark_text(align="left", dx=5, color="#00b8c9", fontWeight="bold").encode(
         x=alt.X("posicion_texto:Q", scale=escala), text="etiqueta:N")
     grafica = barras + etiquetas
     if pd.notna(referencia):
         linea = alt.Chart(pd.DataFrame({"referencia": [referencia]})).mark_rule(
             color="#e6ae00", strokeDash=[6, 4], strokeWidth=2).encode(
                 x=alt.X("referencia:Q", scale=escala),
-                tooltip=[alt.Tooltip("referencia:Q", title="Promedio regional completo",
+                tooltip=[alt.Tooltip("referencia:Q", title="Benchmark regional completo",
                                      format=".2%" if metrica == "% Dcto" else ",.2f")])
         grafica = grafica + linea
     return grafica.properties(height=max(150, len(datos) * 27))
@@ -252,22 +253,34 @@ def mostrar_dashboard(visibles, region):
     import streamlit as st
 
     referencia = referencia_regional(region)
-    st.subheader("Dashboard regional de tiendas")
-    st.caption(f"Comparando {len(visibles)} de {len(region)} sucursales. Línea amarilla: promedio regional "
+    st.subheader("Dashboard regional de KPIs")
+    st.caption(f"Comparando {len(visibles)} de {len(region)} sucursales. Línea amarilla: benchmark regional "
                "completo, ponderado según el indicador; incluye todas las tiendas del archivo "
                "y no cambia con el filtro por estado.")
-    principales = (("UPT", "UPT · Items x Doc."), ("ASP", "ASP · Precio x Unidad"),
-                   ("ATV", "ATV · Venta x Documento"), ("Venta x Mt2", "Rendimiento por m² · Venta x Mt2"))
+    una_columna = st.toggle("Ampliar gráficas a una por fila", key="regional_graficas_amplias",
+                             help="Activa esta opción si los nombres no caben en dos columnas.")
+    principales = (("UPT", "UPT · Items x Doc."), ("ATV", "ATV · Venta x Documento"),
+                   ("ASP", "ASP · Precio x Unidad"), ("Venta x Mt2", "Rendimiento por m² · Venta x Mt2"))
+    formulas = {"UPT": "Σ Unidades / Σ # Doc.", "ATV": "Σ Venta / Σ # Doc.",
+                "ASP": "Σ Venta / Σ Unidades"}
     for inicio in (0, 2):
-        for columna, (metrica, titulo) in zip(st.columns(2), principales[inicio:inicio + 2]):
+        contenedores = [st.container(), st.container()] if una_columna else st.columns(2)
+        for columna, (metrica, titulo) in zip(contenedores, principales[inicio:inicio + 2]):
             with columna:
-                st.metric(titulo + " · Promedio regional", formato(referencia[metrica]))
-                st.altair_chart(grafica_kpi(visibles, metrica, referencia[metrica]), width="stretch")
+                st.metric(titulo + " · Benchmark regional completo", formato(referencia[metrica]))
+                if metrica == "Venta x Mt2" and not (visibles.Mt2 > 0).any():
+                    st.info("Sin tiendas con Mt2 > 0 en este filtro. Rendimiento: N/D.")
+                else:
+                    st.altair_chart(grafica_kpi(visibles, metrica, referencia[metrica]), width="stretch")
                 if metrica == "Venta x Mt2":
                     st.caption(f"Σ Venta / Σ Mt2, solo tiendas con Mt2 > 0: "
-                               f"{int((region.Mt2 > 0).sum())}/{len(region)} comparables. N/D: área inválida.")
-                elif visibles[metrica].isna().any():
-                    st.caption("N/D: denominador no positivo; no comparable.")
+                               f"{int((region.Mt2 > 0).sum())}/{len(region)} comparables en toda la región. "
+                               f"Excluidas del gráfico por área inválida en este filtro: {int((~(visibles.Mt2 > 0)).sum())}. "
+                               "Se conservan como N/D en las tablas.")
+                else:
+                    st.caption(formulas[metrica] + " · Toda la región, sin aplicar el filtro estatal.")
+                    if visibles[metrica].isna().any():
+                        st.caption("N/D: denominador no positivo; no comparable.")
     with st.expander("Indicadores secundarios: Venta, Venta Neta y % Dcto"):
         metrica = st.selectbox("Indicador secundario", ("Venta", "Venta Neta", "% Dcto"), key="regional_secundario")
         st.caption("Promedio regional completo: " + formato(referencia[metrica], metrica == "% Dcto") +
