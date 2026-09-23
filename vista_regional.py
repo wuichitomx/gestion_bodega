@@ -1,4 +1,4 @@
-"""Lectura y análisis regional aislados: sin persistencia ni servicios externos."""
+"""Lectura y análisis regional; persistencia inyectada desde la app autenticada."""
 from io import BytesIO
 from pathlib import Path
 import json
@@ -124,11 +124,28 @@ def leer_reporte(origen):
     if len(encontrados) != 1:
         raise ValueError("Se requiere exactamente una hoja con el extracto por almacén.")
     registros, totales, hoja = encontrados[0]
+    return reconstruir_reporte(registros, totales, hoja)
+
+
+def reconstruir_reporte(registros, totales=None, hoja=""):
+    """Única ruta de validación, KPIs y catálogo para Excel y Supabase."""
+    totales = totales or []
     if not registros:
         raise ValueError("El reporte no contiene sucursales.")
     if len(totales) > 1:
         raise ValueError("Hay varias filas TOTALES; no se pueden distinguir los bloques.")
-    df = pd.DataFrame(registros)
+    limpios = []
+    for fila in registros:
+        cod = codigo(fila.get("codigo"))
+        nombre = str(fila.get("nombre") or "").strip()
+        if not cod or not nombre or normalizar(cod) == "totales" or normalizar(nombre) == "totales":
+            raise ValueError("Código o nombre de almacén inválido; TOTALES no es una tienda.")
+        limpios.append({"codigo": cod, "nombre": nombre,
+                        **{k: numero(None if k == "Mt2" and pd.isna(fila.get(k)) else fila.get(k),
+                                     opcional=k == "Mt2") for k in (*ADITIVOS, "Mt2")}})
+    totales = [{k: numero(None if k == "Mt2" and pd.isna(t.get(k)) else t.get(k),
+                          opcional=k == "Mt2") for k in (*ADITIVOS, "Mt2")} for t in totales]
+    df = pd.DataFrame(limpios)
     if df.codigo.duplicated().any():
         raise ValueError("Código de Almacén duplicado; no se suman bloques o periodos automáticamente.")
     for k in ("# Doc", "Unidades"):
@@ -289,23 +306,57 @@ def mostrar_dashboard(visibles, region):
         st.altair_chart(grafica_kpi(visibles, metrica, referencia[metrica]), width="stretch")
 
 
-def mostrar_vista_regional():
+def mostrar_vista_regional(repositorio=None):
     import streamlit as st
     import altair as alt
+    from regional_persistencia import ErrorRegional
 
     st.header("🌎 Vista Regional")
-    st.caption("17 sucursales en catálogo · Reporte por almacén · Carga privada durante esta sesión")
-    archivo = st.file_uploader("Cargar RpVtas_Extracto_Almacen.xlsx", type=["xlsx"], key="regional_archivo")
-    if archivo is None:
-        st.info("Carga el extracto para consultar el ranking, el mapa y el detalle de sucursales.")
-        st.dataframe(catalogo().fillna("Por confirmar"), hide_index=True, width="stretch")
+    if repositorio is None:
+        st.info("Abre Vista Regional desde Sinapsis para consultar o actualizar el reporte compartido.")
         return
     try:
-        df, control, avisos, hoja = leer_reporte(archivo.getvalue())
-    except ValueError as exc:
+        vigente = repositorio.cargar()
+    except ErrorRegional as exc:
         st.error(str(exc))
         return
-    st.caption(f"Archivo: {archivo.name} · Hoja: {hoja}. El extracto no informa fechas: verifica su periodo de origen.")
+    if vigente:
+        st.caption(f"Fecha del reporte: {vigente['fecha']:%d/%m/%Y}")
+    else:
+        st.info("No hay reporte regional vigente. Carga el primer reporte para consultar los resultados.")
+    # El widget nativo muestra el nombre seleccionado; ocultarlo sólo en esta carga.
+    st.markdown('''<style>
+        .st-key-regional_carga [data-testid="stFileUploaderFile"],
+        .st-key-regional_carga [data-testid="stFileChip"] {display:none}
+        .st-key-regional_carga [data-testid="stFileChips"]::before {
+            content:"Selección lista. Guarda para validar el reporte.";
+        }
+        </style>''', unsafe_allow_html=True)
+    with st.container(key="regional_carga"):
+        with st.expander("Actualizar reporte regional", expanded=vigente is None):
+            version = st.session_state.get("regional_carga_version", 0)
+            with st.form(f"regional_form_{version}"):
+                fecha = st.date_input("Fecha del reporte", value=None, format="DD/MM/YYYY")
+                archivo = st.file_uploader("Seleccionar Excel regional", type=["xlsx"], key=f"regional_archivo_{version}")
+                enviar = st.form_submit_button("Guardar reporte regional")
+            if enviar:
+                if fecha is None or archivo is None:
+                    st.error("Selecciona la Fecha del reporte y el Excel regional.")
+                else:
+                    try:
+                        nuevo, conciliacion, _, _ = leer_reporte(archivo.getvalue())
+                        repositorio.guardar(fecha, nuevo, conciliacion)
+                    except (ValueError, ErrorRegional) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state["regional_carga_version"] = version + 1
+                        for clave in ("regional_estado", "regional_click", "regional_tienda"):
+                            st.session_state.pop(clave, None)
+                        st.rerun()
+    if vigente is None:
+        st.dataframe(catalogo().fillna("Por confirmar"), hide_index=True, width="stretch")
+        return
+    df, control, avisos = vigente["df"], vigente["control"], vigente["avisos"]
     for aviso in avisos:
         st.warning(aviso)
     cols = st.columns(4)

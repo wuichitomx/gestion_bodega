@@ -9,7 +9,11 @@ from streamlit.testing.v1 import AppTest
 
 class VistaTests(unittest.TestCase):
     def test_sin_archivo(self):
-        app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "vista_regional.py")).run()
+        app = AppTest.from_string('''
+from unittest.mock import Mock
+from vista_regional import mostrar_vista_regional
+mostrar_vista_regional(Mock(cargar=Mock(return_value=None)))
+''', default_timeout=30).run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.dataframe[0].value), 17)
 
@@ -18,12 +22,12 @@ class VistaTests(unittest.TestCase):
         app = AppTest.from_string('''
 import io, os
 from pathlib import Path
-from unittest.mock import patch
-from vista_regional import mostrar_vista_regional
-archivo = io.BytesIO(Path(os.environ['REGIONAL_EXCEL_REAL']).read_bytes())
-archivo.name = 'RpVtas_Extracto_Almacen.xlsx'
-with patch('streamlit.file_uploader', return_value=archivo):
-    mostrar_vista_regional()
+from unittest.mock import Mock
+from vista_regional import mostrar_vista_regional, leer_reporte
+from regional_persistencia import serializar_reporte, restaurar_reporte
+df, control, _, _ = leer_reporte(Path(os.environ['REGIONAL_EXCEL_REAL']).read_bytes())
+datos = dict(id='prueba', fecha_reporte='2026-09-23', **serializar_reporte(df, control))
+mostrar_vista_regional(Mock(cargar=Mock(return_value=restaurar_reporte(datos))))
 ''', default_timeout=30).run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.metric), 8)

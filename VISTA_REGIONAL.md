@@ -1,20 +1,45 @@
-# Vista Regional — dashboard de tiendas
+# Vista Regional — reporte compartido
 
-Prototipo original `bec0ad1`, creado desde `main` en `15034448a3541cca1cb2b37597155b2b689817d9` e integrado en `desarrollo`. La continuación del 22/09/2026 se realizó únicamente en `desarrollo`.
-Antes de editar se comprobaron estado limpio, historial y referencias remotas: `desarrollo=bec0ad1`, `main=1503444`. Ya existían lector, catálogo, mapa, ranking, detalle y referencias ponderadas; no había dashboard comparativo ni cambios sin guardar de esa iteración.
-No requiere SQL, Supabase adicional, cambios de autenticación ni servicios de mapas en ejecución.
+## Instalación actual (desarrollo)
+
+1. En el SQL Editor del proyecto Supabase que usa Sinapsis, ejecutar **una vez el archivo completo `migrations/004_reportes_regionales.sql`**, incluyendo BEGIN y COMMIT. Es una migración nueva; no volver a ejecutar ni editar las migraciones históricas. Requiere la tabla existente `public.usuarios` con `username` y `rol`; no modifica esa tabla ni las de Caja.
+2. La app reutiliza `SUPABASE_URL` y `SUPABASE_SERVICE_ROLE_KEY` del servidor Streamlit, igual que el patrón existente de persistencia privada. Confirmar que la clave privada ya está configurada en el despliegue de desarrollo. Si falta, el responsable del despliegue debe configurarla allí; jamás ponerla en Git, en el navegador ni sustituirla por una clave pública. Codex no cambia Secrets.
+3. Publicar este cambio exclusivamente en `desarrollo` y comprobar que la instancia de Streamlit usada para probar ejecuta esa rama y ese commit. No requiere merge a `main`. La migración debe estar instalada antes de entrar a la vista nueva.
+
+## Arquitectura y seguridad
+
+`reportes_regionales` guarda fecha operativa, identificador, auditoría interna, conciliación TOTALES y la marca de vigente. `reporte_regional_detalle` tiene una fila por tienda, con PK `(reporte_id, codigo_almacen)`; `datos` JSONB conserva nombre, los diez importes/cantidades de `ADITIVOS` y Mt2 original. Se guardan las bases de UPT/Items x Doc., ATV/Venta x Documento, ASP/Precio x Unidad, descuento y rendimiento; se recalculan con la misma función que usa el lector. No se guarda el Excel ni su nombre. TOTALES es sólo control de conciliación, nunca una tienda.
+
+`regional_publicar_reporte` valida los campos y el rol, bloquea las cargas concurrentes con un advisory lock, inserta cabecera y detalle completos y después cambia el vigente dentro de la misma transacción. Cualquier error revierte todo; un índice único impide dos vigentes. Se conserva el histórico sin interfaz adicional. Si dos cargas compiten, queda vigente la última transacción que publica, independientemente de la fecha operativa elegida. Una respuesta de red incierta pide recargar antes de reintentar: la transacción puede haber terminado aunque el navegador no recibiera confirmación.
+
+`regional_obtener_vigente` obtiene cabecera y detalle en una sola consulta coherente. Se consulta en cada entrada/interacción sin caché del reporte por usuario o dispositivo. Una página ya abierta verá cambios al recargar o interactuar; no se ofrece actualización automática en tiempo real. El catálogo `regional_data/sucursales.json` sigue aportando ubicaciones al reconstruir. Las advertencias de conciliación y catálogo también se reconstruyen. Un error de conexión o migración no se interpreta como ausencia de reporte.
+
+Sinapsis autentica contra su tabla de usuarios y no crea sesiones Supabase Auth. Por eso no sería seguro aceptar un `p_actor` desde RPC públicas ni basar RLS en un `auth.uid()` inexistente. Se reutiliza el servidor confiable: RLS habilitado sin políticas públicas, tablas y funciones denegadas a `anon`/`authenticated`, RPC `SECURITY INVOKER` permitidas sólo a `service_role`. Esta clave permanece en el proceso Python de Streamlit. El actor proviene de la sesión autenticada y cada RPC vuelve a comprobar su rol vigente en `usuarios`. La clave de servicio sigue siendo privilegiada: la frontera de confianza es el servidor, como en el patrón existente; no una identidad declarada por el navegador.
+
+Lectura y actualización mantienen exactamente el acceso existente de Vista Regional: `rol=admin`. El puesto descriptivo `Gerente` no concede acceso por sí solo y no se amplían permisos ni se modifica autenticación. La cabecera muestra únicamente **Fecha del reporte: DD/MM/AAAA**. El formulario pide esa fecha y el Excel; el nombre seleccionado del widget nativo se oculta sólo dentro de la carga regional. Auditoría interna no se devuelve a la UI.
 
 ## Probar
 
 Desde este worktree, con las dependencias de `requirements.txt` disponibles:
 
 ```powershell
-python -m streamlit run vista_regional.py --server.address 127.0.0.1
+python -m streamlit run app_nuevo.py --server.address 127.0.0.1
 ```
 
-La entrada independiente sirve únicamente para revisión local. Para probar la integración habitual, iniciar `app_nuevo.py`, entrar con el rol administrador existente y elegir **Operación → 🌎 Vista Regional**. El menú y la ruta comprueban `es_admin`; un puesto descriptivo de gerente no concede permisos nuevos.
+Entrar con un administrador existente y elegir **Operación → 🌎 Vista Regional**. La entrada independiente `vista_regional.py` indica que se debe abrir desde Sinapsis; no ofrece un guardado temporal que pueda confundirse con persistencia.
 
-Cargar `RpVtas_Extracto_Almacen.xlsx`. El reporte se procesa en memoria por sesión, sin guardarlo ni compartirlo mediante caché global. El Excel privado no forma parte del repositorio. No se probaron producción ni servicios externos de Sinapsis.
+1. Sin vigente, debe aparecer la carga inicial. Seleccionar **Fecha del reporte**, seleccionar el Excel y pulsar **Guardar reporte regional**. Comprobar fecha, mapa, dashboard, ranking y detalle.
+2. Cerrar sesión. En el celular abrir la misma instancia de Streamlit, iniciar sesión con acceso regional y entrar a la vista: debe verse el mismo reporte sin subir Excel. Probar también una sesión privada en la computadora.
+3. En computadora abrir **Actualizar reporte regional**, elegir otra fecha/Excel y guardar. Recargar la vista en el celular: debe aparecer el nuevo reporte y su fecha. El anterior queda en histórico.
+4. Probar un Excel inválido: debe informar el error y seguir mostrando el vigente anterior. Confirmar que Oaxaca con Mt2=0 continúa N/D y fuera del benchmark; TOTALES nunca aparece en ranking. No debe aparecer nombre del archivo ni autor de carga.
+
+## Validación local de persistencia
+
+`python -m unittest discover -s tests -p 'test_vista_regional*.py' -v` ejecuta lector, serialización, reconstrucción, RPC simuladas y flujos AppTest. Definir `REGIONAL_EXCEL_REAL` con la ruta privada de `RpVtas_Extracto_Almacen.xlsx` para incluir las comparaciones de las 17 tiendas reales y la navegación. No agregar ese Excel al repositorio.
+
+`tests/regional_migracion_local.mjs` ejecuta la migración real en PostgreSQL WASM en memoria (PGlite 0.5.8), con usuarios ficticios y sin acceso a Supabase. Instalar `@electric-sql/pglite@0.5.8` en una carpeta temporal ajena a la app, definir `REGIONAL_PGLITE_MODULE` con la ruta absoluta a `node_modules/@electric-sql/pglite/dist/index.js` y ejecutar `node tests/regional_migracion_local.mjs`. Comprueba autorizaciones y revocación, prohibición para anon/authenticated, histórico, unicidad del vigente, validación y rollback con fallo inducido. No representa una prueba de concurrencia de múltiples conexiones ni de despliegue/credenciales reales.
+
+La validación local no ejecuta SQL en producción ni prueba las sesiones autenticadas de computadora/celular; esos pasos corresponden a la instalación manual anterior.
 
 ## Fuente y lectura
 

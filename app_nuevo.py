@@ -1856,7 +1856,19 @@ if pagina_actual == "🌎 Vista Regional":
         st.error("Vista Regional requiere acceso de administrador.")
         st.stop()
     from vista_regional import mostrar_vista_regional
-    mostrar_vista_regional()
+    from regional_persistencia import RepositorioRegional
+    # Autenticación propia: la clave privada sólo vive en el servidor Streamlit,
+    # como en el patrón existente; las RPC vuelven a comprobar el rol del actor.
+    clave_regional = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not clave_de_servidor(clave_regional):
+        st.error("Vista Regional requiere la conexión privada de servidor a Supabase.")
+        st.stop()
+    try:
+        cliente_regional = create_client(st.secrets["SUPABASE_URL"], clave_regional)
+    except Exception:
+        st.error("No se pudo configurar la conexión del reporte regional.")
+        st.stop()
+    mostrar_vista_regional(RepositorioRegional(cliente_regional, st.session_state.usuario_actual))
 
 if pagina_actual == "💵 Arqueo de caja":
     if not permisos_actuales & OPERATIVOS:
